@@ -1,0 +1,30 @@
+; مثال فایل extensions.conf برای Asterisk
+; این فایل را کپی کنید و به نام extensions.conf ذخیره کنید
+; مسیر: /etc/asterisk/extensions.conf (یا conf/asterisk/extensions.conf برای Docker)
+
+[general]
+static=yes
+writeprotect=no
+autofallthrough=yes
+
+[globals]
+; متغیرهای سراسری
+
+[from-internal]
+; Context برای تماس‌های داخلی
+; اینجا می‌توانید روتینگ تماس‌ها را تنظیم کنید
+
+; مثال: روتینگ به SIP Trunk
+exten => _X.,1,NoOp(Calling ${EXTEN} from ${CALLERID(num)})
+exten => _X.,n,Set(CALLERID(num)=${CALLERID(num)})
+exten => _X.,n,Dial(SIP/${EXTEN}@your-sip-provider,30,tT)
+exten => _X.,n,Hangup()
+
+; اگر می‌خواهید از Local channel استفاده کنید:
+; exten => _X.,1,Dial(Local/${EXTEN}@from-internal)
+
+; برای testing: فقط echo
+; exten => 100,1,Answer()
+; exten => 100,n,Echo()
+; exten => 100,n,Hangup()
+

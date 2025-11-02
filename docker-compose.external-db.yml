@@ -1,0 +1,60 @@
+# Docker Compose برای استفاده از دیتابیس خارجی (همروش)
+# و Asterisk در Docker
+
+version: '3.8'
+
+services:
+  # 1. سرویس Asterisk در Docker
+  asterisk:
+    build:
+      context: .
+      dockerfile: Dockerfile.asterisk
+    container_name: asterisk_server
+    restart: always
+    volumes:
+      - ./conf/asterisk:/etc/asterisk # مپ کردن کانفیگ‌ها
+      - ./logs/asterisk:/var/log/asterisk
+    ports:
+      - "5060:5060/udp" # SIP UDP
+      - "5060:5060/tcp" # SIP TCP
+      - "5038:5038"     # AMI Port
+      - "10000-10099:10000-10099/udp"  # RTP Range برای صدا
+    networks:
+      - masked-call-net
+    # برای NAT: اگر سرور Docker پشت NAT است
+    # extra_hosts:
+    #   - "external-asterisk:IP_EXTERNAL_SERVER"
+
+  # 2. سرویس وب/ماشین حالت (ماژول اصلی ما)
+  web_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: masked_call_web
+    restart: always
+    ports:
+      - "8000:8000" # API ورودی
+    depends_on:
+      - asterisk
+    environment:
+      # تنظیمات اتصال به دیتابیس خارجی (همروش)
+      # این مقادیر را در .env تنظیم کنید یا در docker-compose.override.yml
+      DB_HOST: ${DB_HOST}  # IP یا hostname دیتابیس روی همروش
+      DB_NAME: ${DB_NAME:-masked_call_db}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_PORT: ${DB_PORT:-5432}
+      # تنظیمات اتصال به AMI (Asterisk Docker)
+      AMI_HOST: asterisk
+      AMI_PORT: ${AMI_PORT:-5038}
+      AMI_USER: ${AMI_USER:-ami_user}
+      AMI_SECRET: ${AMI_SECRET:-ami_secret}
+    networks:
+      - masked-call-net
+
+networks:
+  masked-call-net:
+    driver: bridge
+
+# دیتابیس در اینجا نیست چون از دیتابیس خارجی استفاده می‌کنید
+

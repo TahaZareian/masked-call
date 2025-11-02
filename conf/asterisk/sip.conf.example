@@ -1,0 +1,43 @@
+; مثال فایل sip.conf برای Asterisk
+; این فایل را کپی کنید و به نام sip.conf ذخیره کنید
+; مسیر: /etc/asterisk/sip.conf (یا conf/asterisk/sip.conf برای Docker)
+
+[general]
+context=from-internal
+allowguest=no
+allowoverlap=no
+udpbindaddr=0.0.0.0
+tcpenable=yes
+tcpbindaddr=0.0.0.0
+srvlookup=yes
+alwaysauthreject=yes
+allowtransfer=no
+
+; SIP Trunk به ارائه‌دهنده VoIP یا خطوط فیزیکی
+; این قسمت را با اطلاعات ارائه‌دهنده خود پر کنید
+
+[your-sip-provider]
+type=peer
+host=sip.provider.com  ; آدرس SIP Server ارائه‌دهنده
+username=your_username  ; نام کاربری
+secret=your_password    ; رمز عبور
+fromuser=your_username   ; شماره فرستنده
+fromdomain=sip.provider.com
+canreinvite=no
+insecure=port,invite
+context=from-internal
+dtmfmode=rfc2833
+disallow=all
+allow=ulaw
+allow=alaw
+allow=gsm
+
+; اگر از چند ارائه‌دهنده استفاده می‌کنید:
+; [provider-2]
+; type=peer
+; host=another.provider.com
+; ...
+
+; برای ثبت‌نام خودکار (register):
+; register => username:password@sip.provider.com/provider_name
+

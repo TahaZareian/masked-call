@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  # 1. سرویس دیتابیس PostgreSQL (اختیاری - اگر دیتابیس خارجی دارید حذف کنید)
+  # اگر دیتابیس روی همروش دارید، این بخش را کامنت کنید
+  # و در environment سرویس وب، DB_HOST را به IP دیتابیس خارجی تغییر دهید
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: masked_call_db
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - masked-call-net
+    profiles:
+      - with-local-db  # فقط با profile اجرا می‌شود
+
+  # 2. سرویس Asterisk در Docker
+  asterisk:
+    build:
+      context: .
+      dockerfile: Dockerfile.asterisk
+    container_name: asterisk_server
+    restart: always
+    volumes:
+      - ./conf/asterisk:/etc/asterisk # مپ کردن کانفیگ‌ها
+      - ./logs/asterisk:/var/log/asterisk
+    # expose: 5038  # برای دسترسی داخلی
+    ports:
+      - "5060:5060/udp" # SIP UDP
+      - "5060:5060/tcp" # SIP TCP
+      - "5038:5038" # AMI Port
+      - "10000-10099:10000-10099/udp" # RTP Range برای صدا
+    networks:
+      - masked-call-net
+
+  # 3. سرویس وب/ماشین حالت (ماژول اصلی ما)
+  web_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: masked_call_web
+    restart: always
+    ports:
+      - "8000:8000" # API ورودی
+    depends_on:
+      - asterisk
+      # اگر از دیتابیس محلی استفاده می‌کنید، uncomment کنید:
+      # - db
+    environment:
+      # تنظیمات اتصال به دیتابیس خارجی (همروش)
+      # اگر دیتابیس محلی دارید، DB_HOST=db را استفاده کنید
+      DB_HOST: ${DB_HOST:-db}  # IP دیتابیس خارجی یا 'db' برای محلی
+      DB_NAME: ${DB_NAME:-masked_call_db}
+      DB_USER: ${DB_USER:-user}
+      DB_PASSWORD: ${DB_PASSWORD:-password}
+      DB_PORT: ${DB_PORT:-5432}
+      # تنظیمات اتصال به AMI
+      AMI_HOST: asterisk
+      AMI_PORT: ${AMI_PORT:-5038}
+      AMI_USER: ${AMI_USER:-ami_user}
+      AMI_SECRET: ${AMI_SECRET:-ami_secret}
+    networks:
+      - masked-call-net
+
+networks:
+  masked-call-net:
+    driver: bridge
+
+volumes:
+  db_data:
+

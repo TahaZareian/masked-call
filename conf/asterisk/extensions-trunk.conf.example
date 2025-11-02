@@ -1,0 +1,67 @@
+; مثال extensions.conf برای روتینگ تماس‌ها از Docker به سرور خارجی
+; این فایل را به extensions.conf اضافه کنید یا در asterisk.conf include کنید
+
+[from-internal]
+; Context اصلی برای تماس‌ها
+
+; ============================================
+; روتینگ تماس به سرور خارجی از طریق Trunk
+; ============================================
+
+; مثال 1: همه تماس‌ها به سرور خارجی
+exten => _X.,1,NoOp(Calling ${EXTEN} from ${CALLERID(num)})
+exten => _X.,n,Set(CALLERID(num)=${CALLERID(num)})
+; استفاده از trunk به سرور خارجی
+exten => _X.,n,Dial(SIP/${EXTEN}@external-server-trunk,30,tT)
+exten => _X.,n,Hangup()
+
+; مثال 2: فقط شماره‌های خاص به سرور خارجی
+; مثلا شماره‌های با پیشوند 0
+exten => _09.,1,NoOp(Calling external: ${EXTEN})
+exten => _09.,n,Dial(SIP/${EXTEN}@external-server-trunk,30,tT)
+exten => _09.,n,Hangup()
+
+; مثال 3: استفاده از CallerID Masking
+exten => _X.,1,NoOp(Original CallerID: ${CALLERID(num)})
+exten => _X.,n,Set(CALLERID(num)=${MASKED_CALLER_ID})
+exten => _X.,n,Dial(SIP/${EXTEN}@external-server-trunk,30,tT)
+exten => _X.,n,Hangup()
+
+; ============================================
+; دریافت تماس از سرور خارجی
+; ============================================
+
+; تماس‌های ورودی از سرور خارجی
+exten => _X.,1,NoOp(Incoming call from ${CALLERID(num)} to ${EXTEN})
+exten => _X.,n,Answer()
+exten => _X.,n,Playback(hello-world)
+exten => _X.,n,Hangup()
+
+; ============================================
+; تست و Debug
+; ============================================
+
+; شماره تست: 100
+exten => 100,1,Answer()
+exten => 100,n,Echo()
+exten => 100,n,Hangup()
+
+; شماره تست: بررسی trunk
+exten => 200,1,NoOp(Testing trunk to external server)
+exten => 200,n,System(asterisk -rx "sip show peers")
+exten => 200,n,Playback(vm-goodbye)
+exten => 200,n,Hangup()
+
+; ============================================
+; متغیرهای محیطی برای Masking
+; ============================================
+; 
+; وقتی از API تماس ایجاد می‌شود، می‌توانید متغیرهای Asterisk را set کنید:
+; 
+; در originate_call از AMI:
+; Variable: CALLERID(num)=02112345678|MASKED_CALLER_ID=02112345678
+;
+; سپس در extensions.conf:
+; exten => _X.,1,Set(MASKED_CALLER_ID=${MASKED_CALLER_ID})
+; exten => _X.,n,Set(CALLERID(num)=${MASKED_CALLER_ID})
+

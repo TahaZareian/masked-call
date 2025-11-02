@@ -1,0 +1,55 @@
+# فایل Docker Compose برای اجرای فقط سرویس‌های وب و دیتابیس
+# Asterisk باید روی سرور جداگانه اجرا شود
+
+version: '3.8'
+
+services:
+  # 1. سرویس دیتابیس PostgreSQL
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: masked_call_db
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - masked-call-net
+
+  # 2. سرویس وب/ماشین حالت (بدون Asterisk)
+  web_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: masked_call_web
+    restart: always
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    environment:
+      # تنظیمات اتصال به دیتابیس
+      DB_HOST: db
+      DB_NAME: masked_call_db
+      DB_USER: user
+      DB_PASSWORD: password
+      DB_PORT: 5432
+      # تنظیمات اتصال به AMI (روی سرور جداگانه)
+      # این مقادیر را در .env یا به صورت environment variables تنظیم کنید
+      AMI_HOST: ${AMI_HOST:-192.168.1.100}  # IP سرور Asterisk
+      AMI_PORT: ${AMI_PORT:-5038}
+      AMI_USER: ${AMI_USER:-ami_user}
+      AMI_SECRET: ${AMI_SECRET:-ami_secret}
+    networks:
+      - masked-call-net
+
+networks:
+  masked-call-net:
+    driver: bridge
+
+volumes:
+  db_data:
+
