@@ -1,4 +1,0 @@
-FROM asterisk/asterisk:20-alpine
-# کپی کردن فایل‌های کانفیگ سفارشی شما
-COPY conf/ /etc/asterisk/
-
