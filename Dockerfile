@@ -1,12 +1,19 @@
-# استفاده از image پایه Python
+# استفاده از ایمیج پایتون رسمی
 FROM python:3.11-slim
 
-# تنظیم working directory
+# تنظیم دایرکتوری کاری
 WORKDIR /app
 
-# کپی فایل پایتون
+# کپی فایل requirements و نصب وابستگی‌ها
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# کپی بقیه فایل‌های اپلیکیشن
 COPY app.py .
 
-# اجرای فایل پایتون (نه uvicorn!)
+# پورت اکسپوز کن
+EXPOSE 5000
+
+# اجرای اپلیکیشن
 CMD ["python", "app.py"]
 

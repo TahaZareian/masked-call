@@ -1,36 +1,56 @@
-# راهنمای استفاده
+# برنامه Flask ساده با Docker
 
-این پروژه یک فایل Python ساده دارد که "سلام دنیا" را چاپ می‌کند.
+این یک برنامه Flask ساده است که با Docker containerize شده است.
 
-## مشکل: uvicorn not found
-
-اگر خطای `uvicorn: executable file not found` می‌بینید، یعنی از image قدیمی استفاده می‌شود.
-
-### راه حل:
-
-1. **Build مجدد image:**
-```bash
-docker build -t registry.hamdocker.ir/airoom/masked-call:main .
-```
-
-2. **Push به registry:**
-```bash
-docker push registry.hamdocker.ir/airoom/masked-call:main
-```
-
-3. **یا اگر از platform استفاده می‌کنید، image را refresh کنید**
-
-## تست محلی:
+## اجرای مستقیم
 
 ```bash
-docker build -t test-hello .
-docker run test-hello
+pip install -r requirements.txt
+python app.py
 ```
 
-باید "سلام دنیا" را ببینید!
+## ساخت و اجرای با Docker
 
-## فایل‌های موجود:
+### ساخت ایمیج Docker
+```bash
+docker build -t masked-call .
+```
 
-- `app.py` - فایل Python ساده
-- `Dockerfile` - فایل Docker که app.py را اجرا می‌کند
+### اجرای کانتینر
+```bash
+docker run -p 5000:5000 masked-call
+```
+
+### اجرا در بکگراند
+```bash
+docker run -d -p 5000:5000 --name my-app masked-call
+```
+
+## دسترسی به اپلیکیشن
+
+بعد از اجرا، می‌توانید از طریق آدرس زیر به اپلیکیشن دسترسی پیدا کنید:
+- http://localhost:5000
+- http://localhost:5000/health
+
+## دستورات مفید Docker
+
+### مشاهده لاگ‌ها
+```bash
+docker logs my-app
+```
+
+### توقف کانتینر
+```bash
+docker stop my-app
+```
+
+### حذف کانتینر
+```bash
+docker rm my-app
+```
+
+### حذف ایمیج
+```bash
+docker rmi masked-call
+```
 
