@@ -7,6 +7,6 @@ WORKDIR /app
 # کپی فایل پایتون
 COPY app.py .
 
-# اجرای فایل پایتون
+# اجرای فایل پایتون (نه uvicorn!)
 CMD ["python", "app.py"]
 
