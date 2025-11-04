@@ -114,6 +114,37 @@ def is_ready():
     return jsonify({'status': 'ready'}), 200
 
 
+@app.route('/api/system/my-ip', methods=['GET'])
+def get_my_ip():
+    """دریافت IP واقعی سرور برای اضافه کردن به permit list"""
+    try:
+        import socket
+        # اتصال به یک سرور خارجی برای دریافت IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # اتصال به یک سرور (نیازی به اتصال واقعی نیست)
+            s.connect(('8.8.8.8', 80))
+            ip = s.getsockname()[0]
+        except Exception:
+            ip = 'unknown'
+        finally:
+            s.close()
+
+        return jsonify({
+            'status': 'success',
+            'my_ip': ip,
+            'message': (
+                'این IP را به permit list در Issabel اضافه کنید: '
+                f'permit={ip}/32'
+            )
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
+
+
 @app.route('/api/asterisk/test-connection', methods=['POST'])
 def test_asterisk_connection():
     """تست اتصال به سرور Asterisk بدون احراز هویت"""
@@ -174,31 +205,22 @@ def test_asterisk_connection():
 def asterisk_connect():
     """اتصال به سرور Asterisk"""
     try:
-        manager = AsteriskManager()
+        # استفاده از تنظیمات استاتیک برای کاربر n8n
+        manager = AsteriskManager(
+            host='193.151.147.135',
+            port=5038,
+            username='n8n',
+            secret='P@ziresh24…)@!@%!)%))'
+        )
         
-        # بررسی تنظیمات
-        missing_vars = []
-        if not manager.host:
-            missing_vars.append('ASTERISK_HOST')
-        if not manager.port:
-            missing_vars.append('ASTERISK_PORT')
-        if not manager.username:
-            missing_vars.append('ASTERISK_USERNAME')
-        if not manager.secret:
-            missing_vars.append('ASTERISK_SECRET')
-        
-        if missing_vars:
-            return jsonify({
-                'status': 'error',
-                'message': 'تنظیمات Asterisk کامل نیست',
-                'missing_variables': missing_vars,
-                'current_config': {
-                    'host': manager.host or 'not_set',
-                    'port': manager.port or 'not_set',
-                    'username': manager.username or 'not_set',
-                    'secret': '***' if manager.secret else 'not_set'
-                }
-            }), 400
+        print("=" * 80)
+        print("CONNECTING TO ASTERISK WITH STATIC CONFIG:")
+        print(f"Host: {manager.host}")
+        print(f"Port: {manager.port}")
+        print(f"Username: {manager.username}")
+        secret_mask = '*' * len(manager.secret)
+        print(f"Secret: {secret_mask}")
+        print("=" * 80)
         
         success, error_message = manager.connect()
         if success:

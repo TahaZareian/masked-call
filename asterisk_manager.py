@@ -153,7 +153,10 @@ class AsteriskManager:
 
             # دریافت پیام خوش‌آمدگویی
             welcome_response = self._receive_response()
-            print(f"Asterisk welcome: {welcome_response[:300]}...")
+            print("=" * 80)
+            print("Asterisk Welcome Response (FULL):")
+            print(welcome_response)
+            print("=" * 80)
 
             # ارسال اطلاعات احراز هویت
             # فرمت AMI: Action: Login\r\nUsername: ...\r\nSecret: ...\r\n\r\n
@@ -163,19 +166,52 @@ class AsteriskManager:
                 f"Secret: {self.secret}\r\n"
                 f"\r\n"
             )
-            print(
-                f"Sending login command: "
-                f"Username={self.username}, "
-                f"Secret={'*' * len(self.secret) if self.secret else 'empty'}"
-            )
+            print("=" * 80)
+            print("Sending Login Command:")
+            print(f"Username: {self.username}")
+            secret_mask = '*' * len(self.secret) if self.secret else 'empty'
+            print(f"Secret: {secret_mask}")
+            print("Command (raw bytes):")
+            print(repr(login_command.encode()))
+            print("Command (text):")
+            print(login_command)
+            print("=" * 80)
+            
             self.socket.send(login_command.encode())
 
             # دریافت پاسخ احراز هویت (با timeout بیشتر)
             response = self._receive_response(timeout=5)
-            print(f"Login response: {response[:500]}...")
+            print("=" * 80)
+            print("Login Response (FULL):")
+            print(response)
+            print("=" * 80)
+            
+            # تجزیه خط به خط
+            print("Response Analysis:")
+            lines = response.split('\n')
+            for i, line in enumerate(lines):
+                print(f"Line {i}: {repr(line)}")
+            print("=" * 80)
 
             # بررسی پاسخ
             response_lower = response.lower()
+            print("Checking response indicators...")
+            has_success = 'success' in response_lower
+            has_auth_accepted = 'authentication accepted' in response_lower
+            has_error = 'error' in response_lower
+            has_auth_failed = 'authentication failed' in response_lower
+            
+            print(f"Response contains 'success': {has_success}")
+            print(
+                f"Response contains 'authentication accepted': "
+                f"{has_auth_accepted}"
+            )
+            print(f"Response contains 'error': {has_error}")
+            print(
+                f"Response contains 'authentication failed': "
+                f"{has_auth_failed}"
+            )
+            
             success_indicators = (
                 "success" in response_lower or
                 "authentication accepted" in response_lower or
@@ -188,33 +224,55 @@ class AsteriskManager:
                  "authentication" in response_lower)
             )
 
+            print(f"Success indicators: {success_indicators}")
+            print(f"Error indicators: {error_indicators}")
+
             if success_indicators:
                 self.connected = True
-                print("اتصال به Asterisk برقرار شد")
+                print("=" * 80)
+                print("✓ اتصال به Asterisk برقرار شد")
+                print("=" * 80)
                 return True, ""
             elif error_indicators:
                 # استخراج پیام خطای دقیق
                 error_msg = "Authentication failed"
-                if "message:" in response_lower:
-                    lines = response.split('\n')
-                    for line in lines:
-                        if "message:" in line.lower():
-                            error_msg = line.split(':', 1)[1].strip()
-                            break
+                error_details = {}
+                
+                lines = response.split('\r\n')
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        key = key.strip().lower()
+                        value = value.strip()
+                        error_details[key] = value
+                        if key == 'message':
+                            error_msg = value
+                
+                print("=" * 80)
+                print("✗ خطا در احراز هویت")
+                print("Error Details:")
+                for key, value in error_details.items():
+                    print(f"  {key}: {value}")
+                print("=" * 80)
                 
                 full_error = (
                     f"خطا در احراز هویت: {error_msg}. "
-                    f"پاسخ کامل: {response[:500]}"
+                    f"پاسخ کامل: {response}"
                 )
-                print(full_error)
                 self.disconnect()
                 return False, full_error
             else:
                 error = (
                     f"پاسخ نامعتبر از سرور. "
-                    f"پاسخ: {response[:500]}"
+                    f"پاسخ کامل: {response}"
                 )
-                print(error)
+                print("=" * 80)
+                print("✗ پاسخ نامعتبر")
+                print(f"Response: {response}")
+                print("=" * 80)
                 self.disconnect()
                 return False, error
 
@@ -257,19 +315,29 @@ class AsteriskManager:
 
         response = ""
         self.socket.settimeout(timeout)
+        chunks = []
         try:
             while True:
-                data = self.socket.recv(4096).decode('utf-8', errors='ignore')
+                data = self.socket.recv(4096)
                 if not data:
                     break
-                response += data
+                chunks.append(data)
+                decoded = data.decode('utf-8', errors='ignore')
+                response += decoded
+                print(f"Received chunk: {repr(data)}")
+                print(f"Decoded chunk: {repr(decoded)}")
                 if "\r\n\r\n" in response:
+                    print("Found end marker (\\r\\n\\r\\n)")
                     break
         except socket.timeout:
+            print(f"Socket timeout after {timeout} seconds")
             pass
         except Exception as e:
             print(f"خطا در دریافت پاسخ: {e}")
+            print(f"Exception type: {type(e).__name__}")
 
+        print(f"Total chunks received: {len(chunks)}")
+        print(f"Total response length: {len(response)} bytes")
         return response
 
     def _send_command(
