@@ -213,6 +213,16 @@ def asterisk_connect():
                 }
             }), 200
         else:
+            # بررسی اگر خطای احراز هویت است، راهنمایی بده
+            troubleshooting = ""
+            if "authentication failed" in error_message.lower():
+                troubleshooting = (
+                    "خطا: احراز هویت ناموفق. "
+                    "ممکن است IP شما در permit list نباشد. "
+                    "در فایل manager.conf در Issabel، IP سرور خود را به permit list اضافه کنید: "
+                    "permit=193.151.147.135/32"
+                )
+
             return jsonify({
                 'status': 'error',
                 'message': 'اتصال به Asterisk ناموفق بود',
@@ -222,7 +232,8 @@ def asterisk_connect():
                     'port': manager.port,
                     'username': manager.username,
                     'secret': '***'
-                }
+                },
+                'troubleshooting': troubleshooting if troubleshooting else None
             }), 500
     except Exception as e:
         return jsonify({
