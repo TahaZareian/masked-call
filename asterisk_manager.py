@@ -1,6 +1,7 @@
 import os
 import socket
-from typing import Optional, Dict, List
+import psycopg2
+from typing import Optional, Dict, List, Any
 
 
 class AsteriskManager:
@@ -11,26 +12,127 @@ class AsteriskManager:
         host: Optional[str] = None,
         port: Optional[int] = None,
         username: Optional[str] = None,
-        secret: Optional[str] = None
+        secret: Optional[str] = None,
+        config_name: str = 'default'
     ):
         """
         مقداردهی اولیه Asterisk Manager
+        ابتدا از دیتابیس می‌خواند، سپس از environment variables
 
         Args:
-            host: آدرس سرور Asterisk
-                (از environment variable یا پارامتر)
-            port: پورت AMI (پیش‌فرض: 5038)
-            username: نام کاربری AMI
-                (از environment variable یا پارامتر)
-            secret: رمز عبور AMI
-                (از environment variable یا پارامتر)
+            host: آدرس سرور Asterisk (مستقیم)
+            port: پورت AMI (مستقیم)
+            username: نام کاربری AMI (مستقیم)
+            secret: رمز عبور AMI (مستقیم)
+            config_name: نام پیکربندی در دیتابیس (پیش‌فرض: 'default')
         """
-        self.host = host or os.getenv('ASTERISK_HOST')
-        self.port = port or int(os.getenv('ASTERISK_PORT', '5038'))
-        self.username = username or os.getenv('ASTERISK_USERNAME')
-        self.secret = secret or os.getenv('ASTERISK_SECRET')
+        # اگر به صورت مستقیم داده شده، استفاده کن
+        if host and port and username and secret:
+            self.host = host
+            self.port = port
+            self.username = username
+            self.secret = secret
+        else:
+            # ابتدا از دیتابیس بخوان
+            db_config = self._load_from_db(config_name)
+            if db_config:
+                self.host = db_config.get('host') or ''
+                port_value = db_config.get('port', 5038)
+                self.port = int(port_value) if port_value else 5038
+                self.username = db_config.get('username') or ''
+                self.secret = db_config.get('secret') or ''
+            else:
+                # اگر در دیتابیس نبود، از environment variables بخوان
+                self.host = host or os.getenv('ASTERISK_HOST') or ''
+                self.port = port or int(os.getenv('ASTERISK_PORT', '5038'))
+                username_val = username or os.getenv('ASTERISK_USERNAME')
+                self.username = username_val or ''
+                self.secret = secret or os.getenv('ASTERISK_SECRET') or ''
+
         self.socket: Optional[socket.socket] = None
         self.connected = False
+
+    def _get_db_connection(self):
+        """ایجاد اتصال به دیتابیس"""
+        db_host = os.getenv('DB_HOST')
+        db_port = os.getenv('DB_PORT')
+        db_name = os.getenv('DB_NAME')
+        db_user = os.getenv('DB_USER')
+        db_password = os.getenv('DB_PASSWORD')
+
+        if not all([db_host, db_port, db_name, db_user, db_password]):
+            return None
+
+        try:
+            conn = psycopg2.connect(
+                host=db_host,
+                port=db_port,
+                database=db_name,
+                user=db_user,
+                password=db_password
+            )
+            return conn
+        except Exception as e:
+            print(f"خطا در اتصال به دیتابیس: {e}")
+            return None
+
+    def _load_from_db(
+        self,
+        config_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        بارگذاری تنظیمات از دیتابیس
+
+        Args:
+            config_name: نام پیکربندی
+
+        Returns:
+            دیکشنری تنظیمات یا None
+        """
+        conn = self._get_db_connection()
+        if not conn:
+            return None
+
+        try:
+            # ایجاد جدول در صورت عدم وجود
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS asterisk_config (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) UNIQUE NOT NULL DEFAULT 'default',
+                    host VARCHAR(255),
+                    port INTEGER DEFAULT 5038,
+                    username VARCHAR(255),
+                    secret VARCHAR(255),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+
+            # خواندن تنظیمات
+            cursor.execute("""
+                SELECT host, port, username, secret
+                FROM asterisk_config
+                WHERE name = %s
+            """, (config_name,))
+            row = cursor.fetchone()
+            cursor.close()
+            conn.close()
+
+            if row and row[0]:  # اگر host موجود باشد
+                return {
+                    'host': str(row[0]),
+                    'port': int(row[1]) if row[1] else 5038,
+                    'username': str(row[2]) if row[2] else '',
+                    'secret': str(row[3]) if row[3] else ''
+                }
+            return None
+        except Exception as e:
+            print(f"خطا در خواندن تنظیمات Asterisk از دیتابیس: {e}")
+            if conn:
+                conn.close()
+            return None
 
     def connect(self) -> bool:
         """

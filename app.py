@@ -166,29 +166,142 @@ def asterisk_connect():
 
 @app.route('/api/asterisk/config', methods=['GET'])
 def get_asterisk_config():
-    """بررسی تنظیمات Asterisk (بدون نمایش رمز عبور)"""
-    asterisk_host = os.getenv('ASTERISK_HOST')
-    asterisk_port = os.getenv('ASTERISK_PORT', '5038')
-    asterisk_username = os.getenv('ASTERISK_USERNAME')
-    asterisk_secret = os.getenv('ASTERISK_SECRET')
-    
-    config_status = {
-        'ASTERISK_HOST': 'set' if asterisk_host else 'missing',
-        'ASTERISK_PORT': asterisk_port,
-        'ASTERISK_USERNAME': 'set' if asterisk_username else 'missing',
-        'ASTERISK_SECRET': 'set' if asterisk_secret else 'missing',
-        'all_configured': all([
+    """
+    بررسی تنظیمات Asterisk
+    ابتدا از دیتابیس می‌خواند، سپس از environment variables
+    """
+    config_name = request.args.get('name', 'default')
+    source = None
+    config = None
+
+    # اول از دیتابیس بخوان
+    db_config = get_asterisk_config_from_db(config_name)
+    if db_config:
+        config = db_config
+        source = 'database'
+    else:
+        # اگر در دیتابیس نبود، از environment variables بخوان
+        asterisk_host = os.getenv('ASTERISK_HOST')
+        asterisk_port = os.getenv('ASTERISK_PORT', '5038')
+        asterisk_username = os.getenv('ASTERISK_USERNAME')
+        asterisk_secret = os.getenv('ASTERISK_SECRET')
+
+        if all([
             asterisk_host,
             asterisk_port,
             asterisk_username,
             asterisk_secret
+        ]):
+            config = {
+                'host': asterisk_host,
+                'port': int(asterisk_port),
+                'username': asterisk_username,
+                'secret': asterisk_secret
+            }
+            source = 'environment'
+
+    if not config:
+        return jsonify({
+            'status': 'error',
+            'message': 'تنظیمات Asterisk یافت نشد'
+        }), 404
+
+    config_status = {
+        'host': config.get('host'),
+        'port': config.get('port'),
+        'username': config.get('username'),
+        'secret': '***' if config.get('secret') else None,
+        'source': source,
+        'all_configured': all([
+            config.get('host'),
+            config.get('port'),
+            config.get('username'),
+            config.get('secret')
         ])
     }
-    
+
     return jsonify({
         'status': 'success',
         'config': config_status
     }), 200
+
+
+@app.route('/api/asterisk/config', methods=['POST'])
+def save_asterisk_config():
+    """ذخیره تنظیمات Asterisk در دیتابیس"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'اطلاعات ارسالی نامعتبر است'
+            }), 400
+
+        config_name = data.get('name', 'default')
+        host = data.get('host')
+        port = data.get('port', 5038)
+        username = data.get('username')
+        secret = data.get('secret')
+
+        if not all([host, port, username, secret]):
+            return jsonify({
+                'status': 'error',
+                'message': 'اطلاعات ناقص است'
+            }), 400
+
+        # ذخیره در دیتابیس
+        init_asterisk_config_table()
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'status': 'error',
+                'message': 'خطا در اتصال به دیتابیس'
+            }), 500
+
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO asterisk_config
+                (name, host, port, username, secret)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (name)
+                DO UPDATE SET
+                    host = EXCLUDED.host,
+                    port = EXCLUDED.port,
+                    username = EXCLUDED.username,
+                    secret = EXCLUDED.secret,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING id, created_at, updated_at
+            """, (config_name, host, port, username, secret))
+
+            result = cursor.fetchone()
+            conn.commit()
+            cursor.close()
+            conn.close()
+
+            return jsonify({
+                'status': 'success',
+                'message': f'تنظیمات Asterisk با نام "{config_name}" ذخیره شد',
+                'config': {
+                    'name': config_name,
+                    'id': result[0],
+                    'created_at': result[1].isoformat(),
+                    'updated_at': result[2].isoformat()
+                }
+            }), 200
+        except Exception as e:
+            if conn:
+                conn.rollback()
+                conn.close()
+            return jsonify({
+                'status': 'error',
+                'message': f'خطا در ذخیره تنظیمات: {str(e)}'
+            }), 500
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
 
 
 @app.route('/api/asterisk/trunks', methods=['GET'])
@@ -270,6 +383,78 @@ def init_trunks_table():
         if conn:
             conn.close()
         return False
+
+
+def init_asterisk_config_table():
+    """ایجاد جدول asterisk_config در دیتابیس در صورت عدم وجود"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS asterisk_config (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) UNIQUE NOT NULL DEFAULT 'default',
+                host VARCHAR(255),
+                port INTEGER DEFAULT 5038,
+                username VARCHAR(255),
+                secret VARCHAR(255),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"خطا در ایجاد جدول asterisk_config: {e}")
+        if conn:
+            conn.close()
+        return False
+
+
+def get_asterisk_config_from_db(name: str = 'default'):
+    """
+    خواندن تنظیمات Asterisk از دیتابیس
+
+    Args:
+        name: نام پیکربندی (پیش‌فرض: 'default')
+
+    Returns:
+        دیکشنری تنظیمات یا None
+    """
+    init_asterisk_config_table()
+    conn = get_db_connection()
+    if not conn:
+        return None
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT host, port, username, secret
+            FROM asterisk_config
+            WHERE name = %s
+        """, (name,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if row and row[0]:  # اگر host موجود باشد
+            return {
+                'host': row[0],
+                'port': row[1] or 5038,
+                'username': row[2],
+                'secret': row[3]
+            }
+        return None
+    except Exception as e:
+        print(f"خطا در خواندن تنظیمات Asterisk از دیتابیس: {e}")
+        if conn:
+            conn.close()
+        return None
 
 
 @app.route('/api/asterisk/trunk', methods=['POST'])
