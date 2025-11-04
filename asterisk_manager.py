@@ -160,6 +160,20 @@ class AsteriskManager:
 
             # ارسال اطلاعات احراز هویت
             # فرمت AMI: Action: Login\r\nUsername: ...\r\nSecret: ...\r\n\r\n
+            
+            # بررسی encoding رمز عبور
+            print("=" * 80)
+            print("SECRET ANALYSIS:")
+            print(f"Secret length: {len(self.secret)}")
+            print(f"Secret repr: {repr(self.secret)}")
+            secret_utf8 = self.secret.encode('utf-8')
+            secret_latin1 = self.secret.encode('latin-1', errors='ignore')
+            print(f"Secret bytes (UTF-8): {repr(secret_utf8)}")
+            print(f"Secret bytes (Latin-1): {repr(secret_latin1)}")
+            for i, char in enumerate(self.secret):
+                print(f"  Char {i}: {repr(char)} (U+{ord(char):04X})")
+            print("=" * 80)
+            
             login_command = (
                 f"Action: Login\r\n"
                 f"Username: {self.username}\r\n"
@@ -171,13 +185,19 @@ class AsteriskManager:
             print(f"Username: {self.username}")
             secret_mask = '*' * len(self.secret) if self.secret else 'empty'
             print(f"Secret: {secret_mask}")
-            print("Command (raw bytes):")
-            print(repr(login_command.encode()))
+            print(f"Secret repr: {repr(self.secret)}")
+            print("Command (raw bytes - UTF-8):")
+            cmd_utf8 = login_command.encode('utf-8')
+            print(repr(cmd_utf8))
+            print("Command (raw bytes - Latin-1):")
+            cmd_latin1 = login_command.encode('latin-1', errors='ignore')
+            print(repr(cmd_latin1))
             print("Command (text):")
             print(login_command)
             print("=" * 80)
             
-            self.socket.send(login_command.encode())
+            # ارسال با UTF-8 (استاندارد)
+            self.socket.send(cmd_utf8)
 
             # دریافت پاسخ احراز هویت (با timeout بیشتر)
             response = self._receive_response(timeout=5)
