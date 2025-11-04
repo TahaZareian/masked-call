@@ -1041,52 +1041,52 @@ def make_call():
             }), 500
 
         try:
-            # شروع تماس: انتقال به حالت CALLING_A
-            state_machine.transition_to(CallState.CALLING_A)
-
-            # خواندن trunk name از دیتابیس
-            # اگر trunk name مشخص نشده، از trunk_external استفاده می‌کنیم
-            # اما بهتر است از trunk واقعی استفاده کنیم
-            # برای تماس مستقیم، از SIP/trunk/number استفاده می‌کنیم
-            
-            # خواندن trunk config از دیتابیس
-            trunk_config_data = None
+            # خواندن trunk name واقعی از دیتابیس
+            actual_trunk_name = trunk_name
             init_trunks_table()
             conn = get_db_connection()
             if conn:
                 try:
                     cursor = conn.cursor()
                     cursor.execute("""
-                        SELECT config
+                        SELECT name, config
                         FROM trunks
                         WHERE name = %s
+                        LIMIT 1
                     """, (trunk_name,))
                     row = cursor.fetchone()
                     cursor.close()
                     conn.close()
+                    
                     if row:
-                        trunk_config_data = row[0]
+                        actual_trunk_name = row[0]
+                        print(f"Found trunk in database: {actual_trunk_name}")
                 except Exception as e:
                     print(f"خطا در خواندن trunk از دیتابیس: {e}")
                     if conn:
                         conn.close()
             
+            # اگر trunk_external است و در دیتابیس پیدا نشد، از trunk واقعی استفاده می‌کنیم
+            if actual_trunk_name == 'trunk_external' or not actual_trunk_name:
+                actual_trunk_name = '0utgoing-2191012787'
+                print(f"Using default trunk: {actual_trunk_name}")
+
+            # شروع تماس: انتقال به حالت CALLING_A
+            state_machine.transition_to(CallState.CALLING_A)
+
             # ساخت کانال برای شماره A
-            # برای تماس مستقیم از trunk، از SIP/trunk/number استفاده می‌کنیم
-            # اما باید trunk name واقعی را بدانیم
-            # در Issabel، trunk name معمولاً از config گرفته می‌شود
-            # برای تست، از trunk_name استفاده می‌کنیم
-            channel_a = f"SIP/{trunk_name}/{number_a}"
+            channel_a = f"SIP/{actual_trunk_name}/{number_a}"
             if not caller_id:
                 caller_id = number_a
 
             # برقراری تماس با شماره A
             print(f"Calling {number_a} via {channel_a}")
-            success_a, message_a, action_id_a = manager.originate_call(
+            success_a, message_a, channel_a_id = manager.originate_call_with_channel(
                 channel=channel_a,
-                number=number_a,
-                caller_id=caller_id,
                 context="from-trunk",
+                extension=number_a,
+                priority=1,
+                caller_id=caller_id,
                 timeout=30
             )
 
@@ -1104,14 +1104,16 @@ def make_call():
 
             # تماس با شماره B
             state_machine.transition_to(CallState.CALLING_B)
-            channel_b = f"SIP/{trunk_name}/{number_b}"
+            channel_b = f"SIP/{actual_trunk_name}/{number_b}"
 
+            # برقراری تماس با شماره B
             print(f"Calling {number_b} via {channel_b}")
-            success_b, message_b, action_id_b = manager.originate_call(
+            success_b, message_b, channel_b_id = manager.originate_call_with_channel(
                 channel=channel_b,
-                number=number_b,
-                caller_id=caller_id,
                 context="from-trunk",
+                extension=number_b,
+                priority=1,
+                caller_id=caller_id,
                 timeout=30
             )
 
@@ -1125,6 +1127,20 @@ def make_call():
                     'number_a_connected': True
                 }), 500
 
+            # Bridge کردن دو کانال
+            if channel_a_id and channel_b_id:
+                print(f"Bridging channels: {channel_a_id} <-> {channel_b_id}")
+                bridge_success, bridge_message = manager.bridge_channels(
+                    channel_a_id,
+                    channel_b_id
+                )
+                if bridge_success:
+                    print(f"Bridge successful: {bridge_message}")
+                else:
+                    print(f"Warning: Bridge failed: {bridge_message}")
+                    # حتی اگر bridge ناموفق باشد، دو تماس برقرار شده‌اند
+                    # ممکن است Asterisk به صورت خودکار bridge کند
+
             # انتقال به حالت BRIDGED
             state_machine.transition_to(CallState.BRIDGED)
 
@@ -1135,9 +1151,9 @@ def make_call():
                 'state': state_machine.get_current_state().value,
                 'number_a': number_a,
                 'number_b': number_b,
-                'action_ids': {
-                    'a': action_id_a,
-                    'b': action_id_b
+                'channel_ids': {
+                    'a': channel_a_id,
+                    'b': channel_b_id
                 },
                 'state_history': [
                     state.value for state in state_machine.get_state_history()

@@ -466,6 +466,115 @@ class AsteriskManager:
         else:
             return False, f"پاسخ نامعتبر: {response}", None
 
+    def originate_call_with_channel(
+        self,
+        channel: str,
+        context: str,
+        extension: str,
+        priority: int = 1,
+        caller_id: Optional[str] = None,
+        timeout: int = 30
+    ) -> tuple[bool, str, Optional[str]]:
+        """
+        برقراری تماس با استفاده از Context/Exten (برای bridge کردن)
+
+        Args:
+            channel: کانال تماس (مثال: SIP/trunk/09140916320)
+            context: کانتکست Asterisk (مثال: from-trunk)
+            extension: extension در context
+            priority: اولویت در dialplan
+            caller_id: شماره نمایش داده شده (اختیاری)
+            timeout: زمان انتظار برای برقراری تماس (ثانیه)
+
+        Returns:
+            tuple (success, message, channel_uniqueid)
+        """
+        if not self.connected:
+            success, error = self.connect()
+            if not success:
+                return False, f"خطا در اتصال به Asterisk: {error}", None
+
+        # استفاده از Originate با Context/Exten
+        params = {
+            'Channel': channel,
+            'Context': context,
+            'Exten': extension,
+            'Priority': str(priority),
+            'Timeout': str(timeout * 1000),  # میلی‌ثانیه
+            'Async': 'true'
+        }
+
+        # اگر caller_id مشخص شده، اضافه می‌کنیم
+        if caller_id:
+            params['CallerID'] = caller_id
+
+        print(f"Originate with Context/Exten params: {params}")
+        response = self._send_command('Originate', params)
+        print(f"Originate response: {response}")
+
+        # بررسی پاسخ
+        if 'Response: Success' in response:
+            # استخراج Channel UniqueID از response
+            channel_uniqueid = None
+            for line in response.split('\r\n'):
+                if line.startswith('Channel:'):
+                    channel_uniqueid = line.split(':', 1)[1].strip()
+                    break
+            return True, "تماس با موفقیت آغاز شد", channel_uniqueid
+        elif 'Response: Error' in response:
+            error_msg = "خطا در برقراری تماس"
+            for line in response.split('\r\n'):
+                if line.startswith('Message:'):
+                    error_msg = line.split(':', 1)[1].strip()
+                    break
+            return False, error_msg, None
+        else:
+            return False, f"پاسخ نامعتبر: {response}", None
+
+    def bridge_channels(
+        self,
+        channel1: str,
+        channel2: str
+    ) -> tuple[bool, str]:
+        """
+        Bridge کردن دو کانال در Asterisk
+
+        Args:
+            channel1: کانال اول (مثال: SIP/trunk-00000001)
+            channel2: کانال دوم (مثال: SIP/trunk-00000002)
+
+        Returns:
+            tuple (success, message)
+        """
+        if not self.connected:
+            success, error = self.connect()
+            if not success:
+                return False, f"خطا در اتصال به Asterisk: {error}"
+
+        # استفاده از Manager Bridge action
+        params = {
+            'Channel1': channel1,
+            'Channel2': channel2,
+            'Tone': 'no'
+        }
+
+        print(f"Bridge params: {params}")
+        response = self._send_command('Bridge', params)
+        print(f"Bridge response: {response}")
+
+        # بررسی پاسخ
+        if 'Response: Success' in response:
+            return True, "Bridge با موفقیت انجام شد"
+        elif 'Response: Error' in response:
+            error_msg = "خطا در bridge کردن"
+            for line in response.split('\r\n'):
+                if line.startswith('Message:'):
+                    error_msg = line.split(':', 1)[1].strip()
+                    break
+            return False, error_msg
+        else:
+            return False, f"پاسخ نامعتبر: {response}"
+
     def _send_command(
         self,
         action: str,
