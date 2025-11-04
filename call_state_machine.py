@@ -1,4 +1,5 @@
 from enum import Enum
+import uuid
 
 
 class CallState(Enum):
@@ -65,6 +66,7 @@ class CallSessionStateMachine:
         """
         self.current_state = initial_state
         self.state_history = [initial_state]
+        self.session_id = str(uuid.uuid4())
 
     def transition_to(self, new_state: CallState) -> bool:
         """
@@ -126,6 +128,15 @@ class CallSessionStateMachine:
             لیست تمام حالت‌هایی که از ابتدا تا کنون داشتیم
         """
         return self.state_history.copy()
+
+    def get_session_id(self) -> str:
+        """
+        دریافت شناسه جلسه
+
+        Returns:
+            شناسه منحصر به فرد جلسه
+        """
+        return self.session_id
 
     def reset(self, initial_state: CallState = CallState.PENDING):
         """
