@@ -205,22 +205,43 @@ def test_asterisk_connection():
 def asterisk_connect():
     """اتصال به سرور Asterisk"""
     try:
-        # استفاده از تنظیمات استاتیک برای کاربر n8n
-        manager = AsteriskManager(
-            host='193.151.147.135',
-            port=5038,
-            username='n8n',
-            secret='P@ziresh24…)@!@%!)%))'
-        )
+        # خواندن تنظیمات از دیتابیس
+        manager = AsteriskManager()
         
         print("=" * 80)
-        print("CONNECTING TO ASTERISK WITH STATIC CONFIG:")
+        print("CONNECTING TO ASTERISK:")
         print(f"Host: {manager.host}")
         print(f"Port: {manager.port}")
         print(f"Username: {manager.username}")
-        secret_mask = '*' * len(manager.secret)
-        print(f"Secret: {secret_mask}")
+        secret_length = len(manager.secret) if manager.secret else 0
+        secret_repr = repr(manager.secret) if manager.secret else 'None'
+        print(f"Secret length: {secret_length}")
+        print(f"Secret repr: {secret_repr}")
         print("=" * 80)
+        
+        # بررسی تنظیمات
+        missing_vars = []
+        if not manager.host:
+            missing_vars.append('ASTERISK_HOST')
+        if not manager.port:
+            missing_vars.append('ASTERISK_PORT')
+        if not manager.username:
+            missing_vars.append('ASTERISK_USERNAME')
+        if not manager.secret:
+            missing_vars.append('ASTERISK_SECRET')
+        
+        if missing_vars:
+            return jsonify({
+                'status': 'error',
+                'message': 'تنظیمات Asterisk کامل نیست',
+                'missing_variables': missing_vars,
+                'current_config': {
+                    'host': manager.host or 'not_set',
+                    'port': manager.port or 'not_set',
+                    'username': manager.username or 'not_set',
+                    'secret': '***' if manager.secret else 'not_set'
+                }
+            }), 400
         
         success, error_message = manager.connect()
         if success:
