@@ -152,30 +152,68 @@ class AsteriskManager:
             self.socket.connect((self.host, self.port))
 
             # دریافت پیام خوش‌آمدگویی
-            response = self._receive_response()
-            print(f"Asterisk response: {response[:200]}...")
+            welcome_response = self._receive_response()
+            print(f"Asterisk welcome: {welcome_response[:300]}...")
 
             # ارسال اطلاعات احراز هویت
+            # فرمت AMI: Action: Login\r\nUsername: ...\r\nSecret: ...\r\n\r\n
             login_command = (
                 f"Action: Login\r\n"
                 f"Username: {self.username}\r\n"
                 f"Secret: {self.secret}\r\n"
                 f"\r\n"
             )
+            print(
+                f"Sending login command: "
+                f"Username={self.username}, "
+                f"Secret={'*' * len(self.secret) if self.secret else 'empty'}"
+            )
             self.socket.send(login_command.encode())
 
-            # دریافت پاسخ احراز هویت
-            response = self._receive_response()
+            # دریافت پاسخ احراز هویت (با timeout بیشتر)
+            response = self._receive_response(timeout=5)
+            print(f"Login response: {response[:500]}...")
+
+            # بررسی پاسخ
+            response_lower = response.lower()
             success_indicators = (
-                "Success" in response or
-                "Message: Authentication accepted" in response
+                "success" in response_lower or
+                "authentication accepted" in response_lower or
+                "message: authentication accepted" in response_lower
             )
+
+            error_indicators = (
+                "authentication failed" in response_lower or
+                ("error" in response_lower and
+                 "authentication" in response_lower)
+            )
+
             if success_indicators:
                 self.connected = True
                 print("اتصال به Asterisk برقرار شد")
                 return True, ""
+            elif error_indicators:
+                # استخراج پیام خطای دقیق
+                error_msg = "Authentication failed"
+                if "message:" in response_lower:
+                    lines = response.split('\n')
+                    for line in lines:
+                        if "message:" in line.lower():
+                            error_msg = line.split(':', 1)[1].strip()
+                            break
+                
+                full_error = (
+                    f"خطا در احراز هویت: {error_msg}. "
+                    f"پاسخ کامل: {response[:500]}"
+                )
+                print(full_error)
+                self.disconnect()
+                return False, full_error
             else:
-                error = f"خطا در احراز هویت. پاسخ: {response[:500]}"
+                error = (
+                    f"پاسخ نامعتبر از سرور. "
+                    f"پاسخ: {response[:500]}"
+                )
                 print(error)
                 self.disconnect()
                 return False, error
