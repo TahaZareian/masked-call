@@ -323,23 +323,66 @@ def create_trunk():
 
 
 @app.route('/api/asterisk/trunk/config', methods=['GET'])
-def get_trunk_config_from_env():
-    """دریافت پیکربندی trunk از environment variables"""
+def get_trunk_config():
+    """
+    دریافت پیکربندی trunk
+    ابتدا از دیتابیس می‌خواند، اگر پیدا نکرد از environment variables
+    """
     try:
         trunk_name = request.args.get('name', 'default')
-        config = TrunkConfig.from_environment(trunk_name)
+        source = None
+        config = None
+        asterisk_config = None
 
-        if not config.get('host'):
+        # اول از دیتابیس بخوان
+        init_trunks_table()
+        conn = get_db_connection()
+        if conn:
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT config, asterisk_config
+                    FROM trunks
+                    WHERE name = %s
+                """, (trunk_name,))
+                row = cursor.fetchone()
+                cursor.close()
+                conn.close()
+
+                if row:
+                    config = row[0]
+                    asterisk_config = row[1]
+                    source = 'database'
+            except Exception as e:
+                print(f"خطا در خواندن از دیتابیس: {e}")
+                if conn:
+                    conn.close()
+
+        # اگر در دیتابیس پیدا نشد، از environment variables بخوان
+        if not config:
+            env_config = TrunkConfig.from_environment(trunk_name)
+            if env_config.get('host'):
+                config = env_config
+                asterisk_config = TrunkConfig.to_asterisk_config(
+                    trunk_name,
+                    config
+                )
+                source = 'environment'
+
+        # اگر هیچ‌کدام پیدا نشد، خطا برگردان
+        if not config or not config.get('host'):
             return jsonify({
                 'status': 'error',
-                'message': 'پیکربندی trunk در environment variables یافت نشد'
+                'message': (
+                    f'پیکربندی trunk "{trunk_name}" '
+                    f'در دیتابیس یا environment variables یافت نشد'
+                )
             }), 404
-
-        asterisk_config = TrunkConfig.to_asterisk_config(trunk_name, config)
 
         return jsonify({
             'status': 'success',
             'trunk_name': trunk_name,
+            'source': source,
             'config': config,
             'asterisk_config': asterisk_config
         }), 200
