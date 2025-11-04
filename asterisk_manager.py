@@ -416,20 +416,23 @@ class AsteriskManager:
                 return False, f"خطا در اتصال به Asterisk: {error}", None
 
         # ساخت دستور Originate
-        # برای تماس مستقیم از trunk، از Context/Exten استفاده می‌کنیم
+        # برای تماس مستقیم از trunk، از Application/Dial استفاده می‌کنیم
         # فرمت: Channel: SIP/trunk/number
-        # Context: from-trunk
-        # Exten: number (شماره مقصد)
+        # Application: Dial
+        # Data: SIP/trunk/number
         
-        # استخراج trunk name از channel برای استفاده در Channel
-        # اما برای تماس مستقیم، از Context/Exten استفاده می‌کنیم
-        # که شماره را مستقیماً در Exten قرار می‌دهیم
+        # استخراج trunk name از channel
+        channel_parts = channel.split('/')
+        trunk_name = (
+            channel_parts[1]
+            if len(channel_parts) > 1 else 'trunk_external'
+        )
         
+        # استفاده از Application/Dial برای تماس مستقیم
         params = {
             'Channel': channel,
-            'Context': context,
-            'Exten': number,  # شماره مقصد مستقیماً در Exten
-            'Priority': '1',
+            'Application': 'Dial',
+            'Data': f"SIP/{trunk_name}/{number}",  # Dial to number
             'Timeout': str(timeout * 1000),  # میلی‌ثانیه
             'Async': 'true'
         }

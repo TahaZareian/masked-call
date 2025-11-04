@@ -868,6 +868,88 @@ def get_trunk_from_db(trunk_name):
         }), 500
 
 
+@app.route('/api/call/simple', methods=['POST'])
+def make_simple_call():
+    """تماس ساده با یک شماره"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'اطلاعات ارسالی نامعتبر است'
+            }), 400
+
+        number = data.get('number')  # شماره مقصد
+        caller_id = data.get('caller_id')  # شماره نمایش داده شده (اختیاری)
+        trunk_name = data.get('trunk', 'trunk_external')  # نام trunk
+
+        if not number:
+            return jsonify({
+                'status': 'error',
+                'message': 'شماره تماس الزامی است'
+            }), 400
+
+        # اتصال به Asterisk
+        manager = AsteriskManager()
+        if not all([
+            manager.host,
+            manager.port,
+            manager.username,
+            manager.secret
+        ]):
+            return jsonify({
+                'status': 'error',
+                'message': 'تنظیمات Asterisk کامل نیست'
+            }), 400
+
+        success, error = manager.connect()
+        if not success:
+            return jsonify({
+                'status': 'error',
+                'message': f'خطا در اتصال به Asterisk: {error}'
+            }), 500
+
+        try:
+            # ساخت کانال برای تماس
+            # برای تماس مستقیم از trunk، از SIP/trunk/number استفاده می‌کنیم
+            channel = f"SIP/{trunk_name}/{number}"
+            if not caller_id:
+                caller_id = number
+
+            # برقراری تماس
+            print(f"Calling {number} via {channel}")
+            success_call, message, action_id = manager.originate_call(
+                channel=channel,
+                number=number,
+                caller_id=caller_id,
+                context="from-trunk",
+                timeout=30
+            )
+
+            if not success_call:
+                return jsonify({
+                    'status': 'error',
+                    'message': f'خطا در تماس با {number}: {message}'
+                }), 500
+
+            return jsonify({
+                'status': 'success',
+                'message': f'تماس با {number} با موفقیت آغاز شد',
+                'number': number,
+                'action_id': action_id
+            }), 200
+
+        finally:
+            # در واقعیت باید پس از پایان تماس قطع شود
+            pass
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
+
+
 @app.route('/api/call/make', methods=['POST'])
 def make_call():
     """برقراری تماس مسدود بین دو شماره"""
