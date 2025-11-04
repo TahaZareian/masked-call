@@ -445,19 +445,32 @@ class AsteriskManager:
 
         # بررسی پاسخ
         if 'Response: Success' in response:
-            # استخراج Channel ID از response (اگر موجود باشد)
+            # استخراج Channel ID از response
+            # در AMI، Originate response ممکن است شامل Events باشد
+            # باید Channel ID واقعی را از Events استخراج کنیم
+            import re
             channel_id = None
-            for line in response.split('\r\n'):
-                if line.startswith('Channel:'):
-                    channel_id = line.split(':', 1)[1].strip()
-                    break
             
-            # اگر Channel ID در response نبود، از Events استفاده می‌کنیم
+            # جستجو برای Channel ID واقعی در response (از Events)
+            # Channel ID واقعی شامل unique ID است (مثال: SIP/0utgoing-2191012787-000002dc)
+            channel_match = re.search(
+                r'Channel:\s*(SIP/[^\r\n]+-\d+)',
+                response
+            )
+            if channel_match:
+                channel_id = channel_match.group(1)
+                print(f"Found real Channel ID from Events: {channel_id}")
+            else:
+                # اگر پیدا نشد، منتظر می‌مانیم
+                import time
+                time.sleep(1)  # منتظر می‌مانیم تا Channel ایجاد شود
+                # Channel ID معمولاً به صورت SIP/trunk-xxxxx است
+            
+            # اگر هنوز Channel ID نداریم، از channel name استفاده می‌کنیم
             if not channel_id:
-                # منتظر می‌مانیم تا Channel ایجاد شود
-                channel_id = self._wait_for_channel(timeout=5)
+                channel_id = channel
             
-            return True, "تماس با موفقیت آغاز شد", channel_id
+            return True, response, channel_id  # response را برمی‌گردانیم تا بتوانیم Channel ID را استخراج کنیم
         elif 'Response: Error' in response:
             error_msg = "خطا در برقراری تماس"
             for line in response.split('\r\n'):

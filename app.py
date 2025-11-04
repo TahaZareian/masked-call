@@ -1080,9 +1080,9 @@ def make_call():
                 caller_id = number_a
 
             # برای bridge کردن دو تماس بدون وابستگی به dialplan:
-            # 1. تماس اول را برقرار می‌کنیم و Channel ID واقعی را می‌گیریم
-            # 2. تماس دوم را برقرار می‌کنیم و Channel ID واقعی آن را می‌گیریم
-            # 3. از Manager Bridge action استفاده می‌کنیم تا دو کانال را bridge کنیم
+            # 1. تماس اول را برقرار می‌کنیم و منتظر می‌مانیم تا پاسخ دهد
+            # 2. پس از پاسخ، تماس دوم را برقرار می‌کنیم و مستقیماً به channel تماس اول dial می‌کنیم
+            # 3. این باعث می‌شود که دو تماس مستقیماً bridge شوند
             
             # برقراری تماس با شماره A (مستقیم بدون dialplan)
             print(f"Calling {number_a} via {channel_a}")
@@ -1102,25 +1102,42 @@ def make_call():
                     'state': state_machine.get_current_state().value
                 }), 500
 
-            # اگر Channel ID نداریم، منتظر می‌مانیم
-            if not channel_a_id:
-                import time
-                time.sleep(2)  # منتظر می‌مانیم تا Channel ایجاد شود
-                # می‌توانیم از Events استفاده کنیم تا Channel ID را بگیریم
-                # برای حالا، از channel name استفاده می‌کنیم
-                channel_a_id = channel_a
+            # Channel ID واقعی از originate_call_direct برگردانده شده است
+            # اگر Channel ID نداریم یا Channel ID همان channel name است، از response استخراج می‌کنیم
+            if not channel_a_id or channel_a_id == channel_a:
+                # استخراج Channel ID واقعی از response (از Events)
+                import re
+                channel_match = re.search(
+                    r'Channel:\s*(SIP/[^\r\n]+-\d+)',
+                    message_a
+                )
+                if channel_match:
+                    channel_a_id = channel_match.group(1)
+                    print(f"Found real Channel ID from Events: {channel_a_id}")
+                else:
+                    # اگر پیدا نشد، از channel name استفاده می‌کنیم
+                    channel_a_id = channel_a
+                    print(f"Using channel name as Channel ID: {channel_a_id}")
 
-            # انتقال به حالت CONNECTED_A
+            # منتظر می‌مانیم تا تماس اول پاسخ دهد
+            # در واقعیت، باید از Events استفاده کنیم تا بفهمیم تماس پاسخ داده است
+            # برای حالا، یک تاخیر کوتاه اضافه می‌کنیم تا کاربر پاسخ دهد
+            import time
+            print(f"Waiting for {number_a} to answer...")
+            time.sleep(5)  # منتظر می‌مانیم تا کاربر پاسخ دهد
+            
+            # انتقال به حالت CONNECTED_A (پس از پاسخ)
             state_machine.transition_to(CallState.CONNECTED_A)
 
-            # تماس با شماره B (مستقیم بدون dialplan)
+            # تماس با شماره B و bridge مستقیم با تماس اول
             state_machine.transition_to(CallState.CALLING_B)
             channel_b = f"SIP/{actual_trunk_name}/{number_b}"
 
-            print(f"Calling {number_b} via {channel_b}")
-            success_b, message_b, channel_b_id = manager.originate_call_direct(
+            # استفاده از originate_bridge_call که مستقیماً به channel تماس اول dial می‌کند
+            print(f"Calling {number_b} via {channel_b} to bridge with {channel_a_id}")
+            success_b, message_b, action_id_b = manager.originate_bridge_call(
                 channel=channel_b,
-                number=number_b,
+                bridge_channel=channel_a_id,  # Dial مستقیم به channel تماس اول
                 caller_id=caller_id,
                 timeout=30
             )
@@ -1129,31 +1146,12 @@ def make_call():
                 state_machine.transition_to(CallState.FAILED_B)
                 return jsonify({
                     'status': 'error',
-                    'message': f'خطا در تماس با {number_b}: {message_b}',
+                    'message': f'خطا در bridge کردن با {number_b}: {message_b}',
                     'session_id': session_id,
                     'state': state_machine.get_current_state().value,
-                    'number_a_connected': True
+                    'number_a_connected': True,
+                    'channel_a_id': channel_a_id
                 }), 500
-
-            # اگر Channel ID نداریم، منتظر می‌مانیم
-            if not channel_b_id:
-                import time
-                time.sleep(2)  # منتظر می‌مانیم تا Channel ایجاد شود
-                channel_b_id = channel_b
-
-            # Bridge کردن دو کانال مستقیماً از طریق AMI
-            print(f"Bridging channels: {channel_a_id} <-> {channel_b_id}")
-            bridge_success, bridge_message = manager.bridge_channels(
-                channel_a_id,
-                channel_b_id
-            )
-            
-            if bridge_success:
-                print(f"Bridge successful: {bridge_message}")
-            else:
-                print(f"Warning: Bridge failed: {bridge_message}")
-                # حتی اگر bridge ناموفق باشد، دو تماس برقرار شده‌اند
-                # ممکن است Asterisk به صورت خودکار bridge کند
 
             # انتقال به حالت BRIDGED
             state_machine.transition_to(CallState.BRIDGED)
@@ -1167,9 +1165,9 @@ def make_call():
                 'number_b': number_b,
                 'channel_ids': {
                     'a': channel_a_id,
-                    'b': channel_b_id
+                    'b': None
                 },
-                'bridge_status': bridge_success if 'bridge_success' in locals() else False,
+                'bridge_method': 'direct_dial',
                 'state_history': [
                     state.value for state in state_machine.get_state_history()
                 ]
