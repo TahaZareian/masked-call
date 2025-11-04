@@ -910,14 +910,52 @@ def make_simple_call():
             }), 500
 
         try:
+            # خواندن trunk name واقعی از دیتابیس
+            # اگر trunk name مشخص نشده یا trunk_external است، از trunk واقعی استفاده می‌کنیم
+            actual_trunk_name = trunk_name
+            
+            # خواندن trunk config از دیتابیس
+            init_trunks_table()
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT name, config
+                        FROM trunks
+                        WHERE name = %s
+                        LIMIT 1
+                    """, (trunk_name,))
+                    row = cursor.fetchone()
+                    cursor.close()
+                    conn.close()
+                    
+                    if row:
+                        # اگر trunk در دیتابیس پیدا شد، از نام آن استفاده می‌کنیم
+                        actual_trunk_name = row[0]
+                        print(f"Found trunk in database: {actual_trunk_name}")
+                except Exception as e:
+                    print(f"خطا در خواندن trunk از دیتابیس: {e}")
+                    if conn:
+                        conn.close()
+            
+            # اگر trunk_external است و در دیتابیس پیدا نشد، از trunk واقعی استفاده می‌کنیم
+            # از لیست Issabel مشخص است که trunk name واقعی 0utgoing-2191012787 است
+            if actual_trunk_name == 'trunk_external' or not actual_trunk_name:
+                # از لیست Issabel، trunk name واقعی 0utgoing-2191012787 است
+                actual_trunk_name = '0utgoing-2191012787'
+                print(f"Using default trunk: {actual_trunk_name}")
+            
             # ساخت کانال برای تماس
             # برای تماس مستقیم از trunk، از SIP/trunk/number استفاده می‌کنیم
-            channel = f"SIP/{trunk_name}/{number}"
+            # توجه: در Issabel، trunk name باید دقیقاً همان باشد که در sip show peers نشان داده می‌شود
+            channel = f"SIP/{actual_trunk_name}/{number}"
             if not caller_id:
                 caller_id = number
 
             # برقراری تماس
             print(f"Calling {number} via {channel}")
+            print(f"Using trunk: {actual_trunk_name}")
             success_call, message, action_id = manager.originate_call(
                 channel=channel,
                 number=number,
