@@ -924,7 +924,38 @@ def make_call():
             # شروع تماس: انتقال به حالت CALLING_A
             state_machine.transition_to(CallState.CALLING_A)
 
+            # خواندن trunk name از دیتابیس
+            # اگر trunk name مشخص نشده، از trunk_external استفاده می‌کنیم
+            # اما بهتر است از trunk واقعی استفاده کنیم
+            # برای تماس مستقیم، از SIP/trunk/number استفاده می‌کنیم
+            
+            # خواندن trunk config از دیتابیس
+            trunk_config_data = None
+            init_trunks_table()
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT config
+                        FROM trunks
+                        WHERE name = %s
+                    """, (trunk_name,))
+                    row = cursor.fetchone()
+                    cursor.close()
+                    conn.close()
+                    if row:
+                        trunk_config_data = row[0]
+                except Exception as e:
+                    print(f"خطا در خواندن trunk از دیتابیس: {e}")
+                    if conn:
+                        conn.close()
+            
             # ساخت کانال برای شماره A
+            # برای تماس مستقیم از trunk، از SIP/trunk/number استفاده می‌کنیم
+            # اما باید trunk name واقعی را بدانیم
+            # در Issabel، trunk name معمولاً از config گرفته می‌شود
+            # برای تست، از trunk_name استفاده می‌کنیم
             channel_a = f"SIP/{trunk_name}/{number_a}"
             if not caller_id:
                 caller_id = number_a
