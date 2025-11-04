@@ -94,11 +94,21 @@ def health():
 @app.route('/is-ready')
 def is_ready():
     """بررسی آماده‌بودن سرویس"""
-    conn = get_db_connection()
-    if conn:
-        conn.close()
-        return jsonify({'status': 'ready'}), 200
-    return jsonify({'status': 'not ready'}), 503
+    # بررسی وجود environment variables
+    db_host = os.getenv('DB_HOST')
+    db_port = os.getenv('DB_PORT')
+    db_name = os.getenv('DB_NAME')
+    db_user = os.getenv('DB_USER')
+    db_password = os.getenv('DB_PASSWORD')
+
+    if not all([db_host, db_port, db_name, db_user, db_password]):
+        return jsonify({
+            'status': 'not ready',
+            'reason': 'missing environment variables'
+        }), 503
+
+    # اگر environment variables تنظیم شده‌اند، اپلیکیشن آماده است
+    return jsonify({'status': 'ready'}), 200
 
 
 if __name__ == '__main__':

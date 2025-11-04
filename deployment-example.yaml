@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: masked-call-db-secret
+  namespace: airoom
+type: Opaque
+stringData:
+  DB_HOST: "5eb8bc27-d15f-44e2-9f39-060d7240e176.hsvc.ir"
+  DB_PORT: "30952"
+  DB_NAME: "postgres"
+  DB_USER: "postgres"
+  DB_PASSWORD: "4fUXe5mT6kpthtcsfeJVq47iZPhVNBR6"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: masked-call
+  namespace: airoom
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: masked-call
+  template:
+    metadata:
+      labels:
+        app: masked-call
+    spec:
+      containers:
+      - name: main
+        image: registry.hamdocker.ir/airoom/masked-call:latest
+        ports:
+        - containerPort: 5000
+        env:
+        - name: DB_HOST
+          valueFrom:
+            secretKeyRef:
+              name: masked-call-db-secret
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            secretKeyRef:
+              name: masked-call-db-secret
+              key: DB_PORT
+        - name: DB_NAME
+          valueFrom:
+            secretKeyRef:
+              name: masked-call-db-secret
+              key: DB_NAME
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: masked-call-db-secret
+              key: DB_USER
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: masked-call-db-secret
+              key: DB_PASSWORD
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /is-ready
+            port: 5000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+
