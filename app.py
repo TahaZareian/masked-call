@@ -119,6 +119,31 @@ def asterisk_connect():
     """اتصال به سرور Asterisk"""
     try:
         manager = AsteriskManager()
+        
+        # بررسی تنظیمات
+        missing_vars = []
+        if not manager.host:
+            missing_vars.append('ASTERISK_HOST')
+        if not manager.port:
+            missing_vars.append('ASTERISK_PORT')
+        if not manager.username:
+            missing_vars.append('ASTERISK_USERNAME')
+        if not manager.secret:
+            missing_vars.append('ASTERISK_SECRET')
+        
+        if missing_vars:
+            return jsonify({
+                'status': 'error',
+                'message': 'تنظیمات Asterisk کامل نیست',
+                'missing_variables': missing_vars,
+                'current_config': {
+                    'host': manager.host or 'not_set',
+                    'port': manager.port or 'not_set',
+                    'username': manager.username or 'not_set',
+                    'secret': '***' if manager.secret else 'not_set'
+                }
+            }), 400
+        
         if manager.connect():
             manager.disconnect()
             return jsonify({
@@ -128,13 +153,42 @@ def asterisk_connect():
         else:
             return jsonify({
                 'status': 'error',
-                'message': 'اتصال به Asterisk ناموفق بود'
+                'message': 'اتصال به Asterisk ناموفق بود',
+                'details': 'لطفاً تنظیمات Asterisk را بررسی کنید'
             }), 500
     except Exception as e:
         return jsonify({
             'status': 'error',
-            'message': f'خطا: {str(e)}'
+            'message': f'خطا: {str(e)}',
+            'error_type': type(e).__name__
         }), 500
+
+
+@app.route('/api/asterisk/config', methods=['GET'])
+def get_asterisk_config():
+    """بررسی تنظیمات Asterisk (بدون نمایش رمز عبور)"""
+    asterisk_host = os.getenv('ASTERISK_HOST')
+    asterisk_port = os.getenv('ASTERISK_PORT', '5038')
+    asterisk_username = os.getenv('ASTERISK_USERNAME')
+    asterisk_secret = os.getenv('ASTERISK_SECRET')
+    
+    config_status = {
+        'ASTERISK_HOST': 'set' if asterisk_host else 'missing',
+        'ASTERISK_PORT': asterisk_port,
+        'ASTERISK_USERNAME': 'set' if asterisk_username else 'missing',
+        'ASTERISK_SECRET': 'set' if asterisk_secret else 'missing',
+        'all_configured': all([
+            asterisk_host,
+            asterisk_port,
+            asterisk_username,
+            asterisk_secret
+        ])
+    }
+    
+    return jsonify({
+        'status': 'success',
+        'config': config_status
+    }), 200
 
 
 @app.route('/api/asterisk/trunks', methods=['GET'])
