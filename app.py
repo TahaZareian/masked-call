@@ -1,6 +1,7 @@
 import os
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import psycopg2
+from asterisk_manager import AsteriskManager
 
 app = Flask(__name__)
 
@@ -109,6 +110,139 @@ def is_ready():
 
     # اگر environment variables تنظیم شده‌اند، اپلیکیشن آماده است
     return jsonify({'status': 'ready'}), 200
+
+
+@app.route('/api/asterisk/connect', methods=['POST'])
+def asterisk_connect():
+    """اتصال به سرور Asterisk"""
+    try:
+        manager = AsteriskManager()
+        if manager.connect():
+            manager.disconnect()
+            return jsonify({
+                'status': 'success',
+                'message': 'اتصال به Asterisk موفق بود'
+            }), 200
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'اتصال به Asterisk ناموفق بود'
+            }), 500
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
+
+
+@app.route('/api/asterisk/trunks', methods=['GET'])
+def list_trunks():
+    """دریافت لیست trunk‌ها"""
+    try:
+        manager = AsteriskManager()
+        if not manager.connect():
+            return jsonify({
+                'status': 'error',
+                'message': 'امکان اتصال به Asterisk وجود ندارد'
+            }), 500
+
+        trunks = manager.list_trunks()
+        manager.disconnect()
+
+        return jsonify({
+            'status': 'success',
+            'trunks': trunks,
+            'count': len(trunks)
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
+
+
+@app.route('/api/asterisk/trunk/<trunk_name>', methods=['GET'])
+def get_trunk_status(trunk_name):
+    """دریافت وضعیت یک trunk"""
+    try:
+        manager = AsteriskManager()
+        if not manager.connect():
+            return jsonify({
+                'status': 'error',
+                'message': 'امکان اتصال به Asterisk وجود ندارد'
+            }), 500
+
+        status = manager.get_trunk_status(trunk_name)
+        manager.disconnect()
+
+        return jsonify({
+            'status': 'success',
+            'trunk': trunk_name,
+            'info': status
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
+
+
+@app.route('/api/asterisk/trunk', methods=['POST'])
+def create_trunk():
+    """ایجاد trunk جدید"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'اطلاعات ارسالی نامعتبر است'
+            }), 400
+
+        trunk_name = data.get('name')
+        host = data.get('host')
+        username = data.get('username')
+        secret = data.get('secret')
+        port = data.get('port', 5060)
+        transport = data.get('transport', 'udp')
+
+        if not all([trunk_name, host, username, secret]):
+            return jsonify({
+                'status': 'error',
+                'message': 'اطلاعات ناقص است'
+            }), 400
+
+        manager = AsteriskManager()
+        if not manager.connect():
+            return jsonify({
+                'status': 'error',
+                'message': 'امکان اتصال به Asterisk وجود ندارد'
+            }), 500
+
+        result = manager.create_pjsip_trunk(
+            trunk_name=trunk_name,
+            host=host,
+            username=username,
+            secret=secret,
+            port=port,
+            transport=transport
+        )
+        manager.disconnect()
+
+        if result:
+            return jsonify({
+                'status': 'success',
+                'message': f'Trunk {trunk_name} با موفقیت ایجاد شد'
+            }), 200
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'خطا در ایجاد trunk'
+            }), 500
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
 
 
 if __name__ == '__main__':
