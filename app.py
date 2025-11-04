@@ -114,6 +114,62 @@ def is_ready():
     return jsonify({'status': 'ready'}), 200
 
 
+@app.route('/api/asterisk/test-connection', methods=['POST'])
+def test_asterisk_connection():
+    """تست اتصال به سرور Asterisk بدون احراز هویت"""
+    try:
+        import socket
+        data = request.get_json() or {}
+        host = data.get('host') or os.getenv('ASTERISK_HOST')
+        port = int(data.get('port', os.getenv('ASTERISK_PORT', '5038')))
+
+        if not host:
+            return jsonify({
+                'status': 'error',
+                'message': 'host مشخص نشده است'
+            }), 400
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((host, port))
+            sock.close()
+
+            if result == 0:
+                return jsonify({
+                    'status': 'success',
+                    'message': f'پورت {port} روی {host} باز است',
+                    'host': host,
+                    'port': port
+                }), 200
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': f'پورت {port} روی {host} بسته است یا در دسترس نیست',
+                    'host': host,
+                    'port': port
+                }), 500
+        except socket.timeout:
+            return jsonify({
+                'status': 'error',
+                'message': f'Timeout: نمی‌توان به {host}:{port} متصل شد',
+                'host': host,
+                'port': port
+            }), 500
+        except Exception as e:
+            return jsonify({
+                'status': 'error',
+                'message': f'خطا: {str(e)}',
+                'host': host,
+                'port': port
+            }), 500
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
+
+
 @app.route('/api/asterisk/connect', methods=['POST'])
 def asterisk_connect():
     """اتصال به سرور Asterisk"""
