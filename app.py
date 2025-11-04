@@ -3,6 +3,7 @@ from flask import Flask, jsonify, request
 import psycopg2
 from psycopg2.extras import Json
 from asterisk_manager import AsteriskManager
+from call_state_machine import CallSessionStateMachine, CallState
 from trunk_config import TrunkConfig
 
 app = Flask(__name__)
@@ -860,6 +861,142 @@ def get_trunk_from_db(trunk_name):
                 'status': 'error',
                 'message': f'خطا: {str(e)}'
             }), 500
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
+
+
+@app.route('/api/call/make', methods=['POST'])
+def make_call():
+    """برقراری تماس مسدود بین دو شماره"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                'status': 'error',
+                'message': 'اطلاعات ارسالی نامعتبر است'
+            }), 400
+
+        number_a = data.get('number_a')  # شماره تماس گیرنده
+        number_b = data.get('number_b')  # شماره مقصد
+        caller_id = data.get('caller_id')  # شماره نمایش داده شده (اختیاری)
+        trunk_name = data.get('trunk', 'trunk_external')  # نام trunk
+
+        if not number_a or not number_b:
+            return jsonify({
+                'status': 'error',
+                'message': 'شماره تماس گیرنده و مقصد الزامی است'
+            }), 400
+
+        # ایجاد State Machine
+        state_machine = CallSessionStateMachine()
+        session_id = state_machine.get_session_id()
+
+        # اتصال به Asterisk
+        manager = AsteriskManager()
+        if not all([
+            manager.host,
+            manager.port,
+            manager.username,
+            manager.secret
+        ]):
+            state_machine.transition_to(CallState.FAILED_SYSTEM)
+            return jsonify({
+                'status': 'error',
+                'message': 'تنظیمات Asterisk کامل نیست',
+                'session_id': session_id,
+                'state': state_machine.get_current_state().value
+            }), 400
+
+        success, error = manager.connect()
+        if not success:
+            state_machine.transition_to(CallState.FAILED_SYSTEM)
+            return jsonify({
+                'status': 'error',
+                'message': f'خطا در اتصال به Asterisk: {error}',
+                'session_id': session_id,
+                'state': state_machine.get_current_state().value
+            }), 500
+
+        try:
+            # شروع تماس: انتقال به حالت CALLING_A
+            state_machine.transition_to(CallState.CALLING_A)
+
+            # ساخت کانال برای شماره A
+            channel_a = f"SIP/{trunk_name}/{number_a}"
+            if not caller_id:
+                caller_id = number_a
+
+            # برقراری تماس با شماره A
+            print(f"Calling {number_a} via {channel_a}")
+            success_a, message_a, action_id_a = manager.originate_call(
+                channel=channel_a,
+                number=number_a,
+                caller_id=caller_id,
+                context="from-trunk",
+                timeout=30
+            )
+
+            if not success_a:
+                state_machine.transition_to(CallState.FAILED_A)
+                return jsonify({
+                    'status': 'error',
+                    'message': f'خطا در تماس با {number_a}: {message_a}',
+                    'session_id': session_id,
+                    'state': state_machine.get_current_state().value
+                }), 500
+
+            # انتقال به حالت CONNECTED_A
+            state_machine.transition_to(CallState.CONNECTED_A)
+
+            # تماس با شماره B
+            state_machine.transition_to(CallState.CALLING_B)
+            channel_b = f"SIP/{trunk_name}/{number_b}"
+
+            print(f"Calling {number_b} via {channel_b}")
+            success_b, message_b, action_id_b = manager.originate_call(
+                channel=channel_b,
+                number=number_b,
+                caller_id=caller_id,
+                context="from-trunk",
+                timeout=30
+            )
+
+            if not success_b:
+                state_machine.transition_to(CallState.FAILED_B)
+                return jsonify({
+                    'status': 'error',
+                    'message': f'خطا در تماس با {number_b}: {message_b}',
+                    'session_id': session_id,
+                    'state': state_machine.get_current_state().value,
+                    'number_a_connected': True
+                }), 500
+
+            # انتقال به حالت BRIDGED
+            state_machine.transition_to(CallState.BRIDGED)
+
+            return jsonify({
+                'status': 'success',
+                'message': 'تماس با موفقیت برقرار شد',
+                'session_id': session_id,
+                'state': state_machine.get_current_state().value,
+                'number_a': number_a,
+                'number_b': number_b,
+                'action_ids': {
+                    'a': action_id_a,
+                    'b': action_id_b
+                },
+                'state_history': [
+                    state.value for state in state_machine.get_state_history()
+                ]
+            }), 200
+
+        finally:
+            # در واقعیت باید پس از پایان تماس قطع شود
+            pass
+
     except Exception as e:
         return jsonify({
             'status': 'error',

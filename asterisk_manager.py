@@ -389,6 +389,68 @@ class AsteriskManager:
         print(f"Total response length: {len(response)} bytes")
         return response
 
+    def originate_call(
+        self,
+        channel: str,
+        number: str,
+        caller_id: Optional[str] = None,
+        context: str = "from-trunk",
+        timeout: int = 30
+    ) -> tuple[bool, str, Optional[str]]:
+        """
+        برقراری تماس به یک شماره
+
+        Args:
+            channel: کانال تماس (مثال: SIP/trunk/09140916320)
+            number: شماره مقصد (مثال: 09221609805)
+            caller_id: شماره نمایش داده شده (اختیاری)
+            context: کانتکست Asterisk (پیش‌فرض: from-trunk)
+            timeout: زمان انتظار برای برقراری تماس (ثانیه)
+
+        Returns:
+            tuple (success, message, action_id)
+        """
+        if not self.connected:
+            success, error = self.connect()
+            if not success:
+                return False, f"خطا در اتصال به Asterisk: {error}", None
+
+        # ساخت دستور Originate
+        params = {
+            'Channel': channel,
+            'Context': context,
+            'Exten': number,
+            'Priority': '1',
+            'Timeout': str(timeout * 1000),  # میلی‌ثانیه
+            'Async': 'true'
+        }
+
+        if caller_id:
+            params['CallerID'] = caller_id
+
+        response = self._send_command('Originate', params)
+
+        # بررسی پاسخ
+        if 'Response: Success' in response:
+            # استخراج ActionID
+            action_id = None
+            for line in response.split('\r\n'):
+                if line.startswith('ActionID:'):
+                    action_id = line.split(':', 1)[1].strip()
+                    break
+
+            return True, "تماس با موفقیت آغاز شد", action_id
+        elif 'Response: Error' in response:
+            # استخراج پیام خطا
+            error_msg = "خطا در برقراری تماس"
+            for line in response.split('\r\n'):
+                if line.startswith('Message:'):
+                    error_msg = line.split(':', 1)[1].strip()
+                    break
+            return False, error_msg, None
+        else:
+            return False, f"پاسخ نامعتبر: {response}", None
+
     def _send_command(
         self,
         action: str,
