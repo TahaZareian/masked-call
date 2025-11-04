@@ -1079,13 +1079,16 @@ def make_call():
             if not caller_id:
                 caller_id = number_a
 
-            # برقراری تماس با شماره A
+            # برای bridge کردن دو تماس بدون وابستگی به dialplan:
+            # 1. تماس اول را برقرار می‌کنیم و Channel ID واقعی را می‌گیریم
+            # 2. تماس دوم را برقرار می‌کنیم و Channel ID واقعی آن را می‌گیریم
+            # 3. از Manager Bridge action استفاده می‌کنیم تا دو کانال را bridge کنیم
+            
+            # برقراری تماس با شماره A (مستقیم بدون dialplan)
             print(f"Calling {number_a} via {channel_a}")
-            success_a, message_a, channel_a_id = manager.originate_call_with_channel(
+            success_a, message_a, channel_a_id = manager.originate_call_direct(
                 channel=channel_a,
-                context="from-trunk",
-                extension=number_a,
-                priority=1,
+                number=number_a,
                 caller_id=caller_id,
                 timeout=30
             )
@@ -1099,20 +1102,25 @@ def make_call():
                     'state': state_machine.get_current_state().value
                 }), 500
 
+            # اگر Channel ID نداریم، منتظر می‌مانیم
+            if not channel_a_id:
+                import time
+                time.sleep(2)  # منتظر می‌مانیم تا Channel ایجاد شود
+                # می‌توانیم از Events استفاده کنیم تا Channel ID را بگیریم
+                # برای حالا، از channel name استفاده می‌کنیم
+                channel_a_id = channel_a
+
             # انتقال به حالت CONNECTED_A
             state_machine.transition_to(CallState.CONNECTED_A)
 
-            # تماس با شماره B
+            # تماس با شماره B (مستقیم بدون dialplan)
             state_machine.transition_to(CallState.CALLING_B)
             channel_b = f"SIP/{actual_trunk_name}/{number_b}"
 
-            # برقراری تماس با شماره B
             print(f"Calling {number_b} via {channel_b}")
-            success_b, message_b, channel_b_id = manager.originate_call_with_channel(
+            success_b, message_b, channel_b_id = manager.originate_call_direct(
                 channel=channel_b,
-                context="from-trunk",
-                extension=number_b,
-                priority=1,
+                number=number_b,
                 caller_id=caller_id,
                 timeout=30
             )
@@ -1127,19 +1135,25 @@ def make_call():
                     'number_a_connected': True
                 }), 500
 
-            # Bridge کردن دو کانال
-            if channel_a_id and channel_b_id:
-                print(f"Bridging channels: {channel_a_id} <-> {channel_b_id}")
-                bridge_success, bridge_message = manager.bridge_channels(
-                    channel_a_id,
-                    channel_b_id
-                )
-                if bridge_success:
-                    print(f"Bridge successful: {bridge_message}")
-                else:
-                    print(f"Warning: Bridge failed: {bridge_message}")
-                    # حتی اگر bridge ناموفق باشد، دو تماس برقرار شده‌اند
-                    # ممکن است Asterisk به صورت خودکار bridge کند
+            # اگر Channel ID نداریم، منتظر می‌مانیم
+            if not channel_b_id:
+                import time
+                time.sleep(2)  # منتظر می‌مانیم تا Channel ایجاد شود
+                channel_b_id = channel_b
+
+            # Bridge کردن دو کانال مستقیماً از طریق AMI
+            print(f"Bridging channels: {channel_a_id} <-> {channel_b_id}")
+            bridge_success, bridge_message = manager.bridge_channels(
+                channel_a_id,
+                channel_b_id
+            )
+            
+            if bridge_success:
+                print(f"Bridge successful: {bridge_message}")
+            else:
+                print(f"Warning: Bridge failed: {bridge_message}")
+                # حتی اگر bridge ناموفق باشد، دو تماس برقرار شده‌اند
+                # ممکن است Asterisk به صورت خودکار bridge کند
 
             # انتقال به حالت BRIDGED
             state_machine.transition_to(CallState.BRIDGED)
@@ -1155,6 +1169,7 @@ def make_call():
                     'a': channel_a_id,
                     'b': channel_b_id
                 },
+                'bridge_status': bridge_success if 'bridge_success' in locals() else False,
                 'state_history': [
                     state.value for state in state_machine.get_state_history()
                 ]

@@ -1,6 +1,8 @@
 import os
 import socket
 import psycopg2
+import time
+import threading
 from typing import Optional, Dict, List, Any
 
 
@@ -59,8 +61,11 @@ class AsteriskManager:
                 self.username = username_val or ''
                 self.secret = secret or os.getenv('ASTERISK_SECRET') or ''
 
-        self.socket: Optional[socket.socket] = None
-        self.connected = False
+            self.socket: Optional[socket.socket] = None
+            self.connected = False
+            self.channel_events: Dict[str, str] = {}  # برای ذخیره Channel IDs از Events
+            self.event_listener_thread: Optional[threading.Thread] = None
+            self.event_listening = False
 
     def _get_db_connection(self):
         """ایجاد اتصال به دیتابیس"""
@@ -389,6 +394,95 @@ class AsteriskManager:
         print(f"Total response length: {len(response)} bytes")
         return response
 
+    def originate_call_direct(
+        self,
+        channel: str,
+        number: str,
+        caller_id: Optional[str] = None,
+        timeout: int = 30
+    ) -> tuple[bool, str, Optional[str]]:
+        """
+        برقراری تماس مستقیم بدون dialplan (برای bridge کردن)
+        از Application/Dial استفاده می‌کند که مستقیماً به شماره dial می‌کند
+
+        Args:
+            channel: کانال تماس (مثال: SIP/trunk/09140916320)
+            number: شماره مقصد (مثال: 09221609805)
+            caller_id: شماره نمایش داده شده (اختیاری)
+            timeout: زمان انتظار برای برقراری تماس (ثانیه)
+
+        Returns:
+            tuple (success, message, channel_id)
+        """
+        if not self.connected:
+            success, error = self.connect()
+            if not success:
+                return False, f"خطا در اتصال به Asterisk: {error}", None
+
+        # استخراج trunk name از channel
+        channel_parts = channel.split('/')
+        trunk_name = (
+            channel_parts[1]
+            if len(channel_parts) > 1 else 'trunk_external'
+        )
+        
+        # استفاده از Application/Dial برای تماس مستقیم (بدون dialplan)
+        params = {
+            'Channel': channel,
+            'Application': 'Dial',
+            'Data': f"SIP/{trunk_name}/{number}",  # Dial مستقیم به شماره
+            'Timeout': str(timeout * 1000),  # میلی‌ثانیه
+            'Async': 'true'
+        }
+
+        # اگر caller_id مشخص شده، اضافه می‌کنیم
+        if caller_id:
+            params['CallerID'] = caller_id
+
+        print(f"Originate Direct params: {params}")
+        response = self._send_command('Originate', params)
+        print(f"Originate Direct response: {response}")
+
+        # بررسی پاسخ
+        if 'Response: Success' in response:
+            # استخراج Channel ID از response (اگر موجود باشد)
+            channel_id = None
+            for line in response.split('\r\n'):
+                if line.startswith('Channel:'):
+                    channel_id = line.split(':', 1)[1].strip()
+                    break
+            
+            # اگر Channel ID در response نبود، از Events استفاده می‌کنیم
+            if not channel_id:
+                # منتظر می‌مانیم تا Channel ایجاد شود
+                channel_id = self._wait_for_channel(timeout=5)
+            
+            return True, "تماس با موفقیت آغاز شد", channel_id
+        elif 'Response: Error' in response:
+            error_msg = "خطا در برقراری تماس"
+            for line in response.split('\r\n'):
+                if line.startswith('Message:'):
+                    error_msg = line.split(':', 1)[1].strip()
+                    break
+            return False, error_msg, None
+        else:
+            return False, f"پاسخ نامعتبر: {response}", None
+
+    def _wait_for_channel(self, timeout: int = 5) -> Optional[str]:
+        """
+        منتظر ماندن برای دریافت Channel ID از Events
+        """
+        import time
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            # بررسی Events برای Channel ID
+            if self.channel_events:
+                # گرفتن آخرین Channel ID
+                channel_id = list(self.channel_events.values())[-1]
+                return channel_id
+            time.sleep(0.1)
+        return None
+
     def originate_call(
         self,
         channel: str,
@@ -574,6 +668,69 @@ class AsteriskManager:
             return False, error_msg
         else:
             return False, f"پاسخ نامعتبر: {response}"
+
+    def originate_bridge_call(
+        self,
+        channel: str,
+        bridge_channel: str,
+        caller_id: Optional[str] = None,
+        timeout: int = 30
+    ) -> tuple[bool, str, Optional[str]]:
+        """
+        برقراری تماس و bridge کردن مستقیم با یک کانال دیگر
+        این متد از Application Dial استفاده می‌کند که مستقیماً به channel دیگر dial می‌کند
+
+        Args:
+            channel: کانال تماس جدید (مثال: SIP/trunk/09140916320)
+            bridge_channel: کانال برای bridge کردن (مثال: SIP/trunk-00000001)
+            caller_id: شماره نمایش داده شده (اختیاری)
+            timeout: زمان انتظار برای برقراری تماس (ثانیه)
+
+        Returns:
+            tuple (success, message, action_id)
+        """
+        if not self.connected:
+            success, error = self.connect()
+            if not success:
+                return False, f"خطا در اتصال به Asterisk: {error}", None
+
+        # استفاده از Application Dial برای bridge مستقیم
+        params = {
+            'Channel': channel,
+            'Application': 'Dial',
+            'Data': bridge_channel,  # Dial مستقیم به channel دیگر
+            'Timeout': str(timeout * 1000),  # میلی‌ثانیه
+            'Async': 'true'
+        }
+
+        # اگر caller_id مشخص شده، اضافه می‌کنیم
+        if caller_id:
+            params['CallerID'] = caller_id
+
+        print(f"Originate Bridge params: {params}")
+        response = self._send_command('Originate', params)
+        print(f"Originate Bridge response: {response}")
+
+        # بررسی پاسخ
+        if 'Response: Success' in response:
+            # استخراج ActionID
+            action_id = None
+            for line in response.split('\r\n'):
+                if line.startswith('ActionID:'):
+                    action_id = line.split(':', 1)[1].strip()
+                    break
+
+            return True, "تماس با موفقیت bridge شد", action_id
+        elif 'Response: Error' in response:
+            # استخراج پیام خطا
+            error_msg = "خطا در bridge کردن تماس"
+            for line in response.split('\r\n'):
+                if line.startswith('Message:'):
+                    error_msg = line.split(':', 1)[1].strip()
+                    break
+            return False, error_msg, None
+        else:
+            return False, f"پاسخ نامعتبر: {response}", None
 
     def _send_command(
         self,
