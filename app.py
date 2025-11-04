@@ -144,17 +144,29 @@ def asterisk_connect():
                 }
             }), 400
         
-        if manager.connect():
+        success, error_message = manager.connect()
+        if success:
             manager.disconnect()
             return jsonify({
                 'status': 'success',
-                'message': 'اتصال به Asterisk موفق بود'
+                'message': 'اتصال به Asterisk موفق بود',
+                'config': {
+                    'host': manager.host,
+                    'port': manager.port,
+                    'username': manager.username
+                }
             }), 200
         else:
             return jsonify({
                 'status': 'error',
                 'message': 'اتصال به Asterisk ناموفق بود',
-                'details': 'لطفاً تنظیمات Asterisk را بررسی کنید'
+                'error_details': error_message,
+                'config_used': {
+                    'host': manager.host,
+                    'port': manager.port,
+                    'username': manager.username,
+                    'secret': '***'
+                }
             }), 500
     except Exception as e:
         return jsonify({
@@ -309,10 +321,12 @@ def list_trunks():
     """دریافت لیست trunk‌ها"""
     try:
         manager = AsteriskManager()
-        if not manager.connect():
+        success, error_msg = manager.connect()
+        if not success:
             return jsonify({
                 'status': 'error',
-                'message': 'امکان اتصال به Asterisk وجود ندارد'
+                'message': 'امکان اتصال به Asterisk وجود ندارد',
+                'error_details': error_msg
             }), 500
 
         trunks = manager.list_trunks()
@@ -335,10 +349,12 @@ def get_trunk_status(trunk_name):
     """دریافت وضعیت یک trunk"""
     try:
         manager = AsteriskManager()
-        if not manager.connect():
+        success, error_msg = manager.connect()
+        if not success:
             return jsonify({
                 'status': 'error',
-                'message': 'امکان اتصال به Asterisk وجود ندارد'
+                'message': 'امکان اتصال به Asterisk وجود ندارد',
+                'error_details': error_msg
             }), 500
 
         status = manager.get_trunk_status(trunk_name)

@@ -134,16 +134,17 @@ class AsteriskManager:
                 conn.close()
             return None
 
-    def connect(self) -> bool:
+    def connect(self) -> tuple[bool, str]:
         """
         اتصال به سرور Asterisk
 
         Returns:
-            True اگر اتصال موفق باشد
+            tuple (success, error_message)
         """
         if not all([self.host, self.port, self.username, self.secret]):
-            print("خطا: تنظیمات Asterisk کامل نیست")
-            return False
+            error = "تنظیمات Asterisk کامل نیست"
+            print(f"خطا: {error}")
+            return False, error
 
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -172,16 +173,36 @@ class AsteriskManager:
             if success_indicators:
                 self.connected = True
                 print("اتصال به Asterisk برقرار شد")
-                return True
+                return True, ""
             else:
-                print(f"خطا در احراز هویت: {response}")
+                error = f"خطا در احراز هویت. پاسخ: {response[:500]}"
+                print(error)
                 self.disconnect()
-                return False
+                return False, error
 
-        except Exception as e:
-            print(f"خطا در اتصال به Asterisk: {e}")
+        except socket.timeout:
+            error = f"Timeout: نمی‌توان به {self.host}:{self.port} متصل شد"
+            print(error)
             self.disconnect()
-            return False
+            return False, error
+        except socket.gaierror as e:
+            error = f"خطا در DNS: نمی‌توان host '{self.host}' را پیدا کرد"
+            print(f"{error}: {e}")
+            self.disconnect()
+            return False, error
+        except ConnectionRefusedError:
+            error = (
+                f"اتصال رد شد: "
+                f"سرور {self.host}:{self.port} در دسترس نیست"
+            )
+            print(error)
+            self.disconnect()
+            return False, error
+        except Exception as e:
+            error = f"خطا در اتصال: {str(e)}"
+            print(error)
+            self.disconnect()
+            return False, error
 
     def _receive_response(self, timeout: int = 5) -> str:
         """
@@ -282,7 +303,8 @@ class AsteriskManager:
             True اگر موفق باشد
         """
         if not self.connected:
-            if not self.connect():
+            success, _ = self.connect()
+            if not success:
                 return False
 
         # بررسی وجود endpoint
@@ -352,7 +374,7 @@ class AsteriskManager:
 
     def __enter__(self):
         """Context manager entry"""
-        self.connect()
+        self.connect()  # ignore result for context manager
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
