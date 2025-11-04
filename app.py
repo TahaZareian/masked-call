@@ -7,17 +7,30 @@ app = Flask(__name__)
 
 def get_db_connection():
     """ایجاد اتصال به دیتابیس از طریق environment variables"""
-    db_host = os.getenv(
-        'DB_HOST',
-        '5eb8bc27-d15f-44e2-9f39-060d7240e176.hsvc.ir'
-    )
-    db_port = os.getenv('DB_PORT', '30952')
-    db_name = os.getenv('DB_NAME', 'postgres')
-    db_user = os.getenv('DB_USER', 'postgres')
-    db_password = os.getenv(
-        'DB_PASSWORD',
-        '4fUXe5mT6kpthtcsfeJVq47iZPhVNBR6'
-    )
+    db_host = os.getenv('DB_HOST')
+    db_port = os.getenv('DB_PORT')
+    db_name = os.getenv('DB_NAME')
+    db_user = os.getenv('DB_USER')
+    db_password = os.getenv('DB_PASSWORD')
+
+    # بررسی وجود تمام environment variables
+    if not all([db_host, db_port, db_name, db_user, db_password]):
+        missing_vars = []
+        if not db_host:
+            missing_vars.append('DB_HOST')
+        if not db_port:
+            missing_vars.append('DB_PORT')
+        if not db_name:
+            missing_vars.append('DB_NAME')
+        if not db_user:
+            missing_vars.append('DB_USER')
+        if not db_password:
+            missing_vars.append('DB_PASSWORD')
+        print(
+            f"خطا: environment variables زیر تنظیم نشده‌اند: "
+            f"{', '.join(missing_vars)}"
+        )
+        return None
 
     try:
         conn = psycopg2.connect(
