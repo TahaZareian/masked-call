@@ -40,7 +40,17 @@ class AsteriskManager:
                 port_value = db_config.get('port', 5038)
                 self.port = int(port_value) if port_value else 5038
                 self.username = db_config.get('username') or ''
-                self.secret = db_config.get('secret') or ''
+                # رمز عبور را بدون تغییر از دیتابیس بگیر
+                secret_from_db = db_config.get('secret')
+                self.secret = secret_from_db if secret_from_db else ''
+                
+                print("=" * 80)
+                print("SECRET ASSIGNED FROM DATABASE:")
+                print(f"Secret type: {type(self.secret)}")
+                print(f"Secret value: {repr(self.secret)}")
+                secret_len = len(self.secret) if self.secret else 0
+                print(f"Secret length: {secret_len}")
+                print("=" * 80)
             else:
                 # اگر در دیتابیس نبود، از environment variables بخوان
                 self.host = host or os.getenv('ASTERISK_HOST') or ''
@@ -121,11 +131,26 @@ class AsteriskManager:
             conn.close()
 
             if row and row[0]:  # اگر host موجود باشد
+                # خواندن رمز عبور بدون تغییر
+                secret_from_db = row[3]
+                print("=" * 80)
+                print("LOADING SECRET FROM DATABASE:")
+                print(f"Secret type: {type(secret_from_db)}")
+                print(f"Secret value: {repr(secret_from_db)}")
+                print(f"Secret length: {len(secret_from_db) if secret_from_db else 0}")
+                secret_bytes = (
+                    secret_from_db.encode('utf-8')
+                    if secret_from_db else b''
+                )
+                print(f"Secret bytes: {repr(secret_bytes)}")
+                print("=" * 80)
+                
                 return {
-                    'host': str(row[0]),
+                    'host': str(row[0]) if row[0] else '',
                     'port': int(row[1]) if row[1] else 5038,
                     'username': str(row[2]) if row[2] else '',
-                    'secret': str(row[3]) if row[3] else ''
+                    # بدون تبدیل، دقیقاً همان‌طور که از دیتابیس خوانده شد
+                    'secret': secret_from_db
                 }
             return None
         except Exception as e:
