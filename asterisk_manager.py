@@ -196,11 +196,89 @@ class AsteriskManager:
             print(login_command)
             print("=" * 80)
             
-            # ارسال با UTF-8 (استاندارد)
+            # تست با چند روش مختلف
+            # روش 1: UTF-8 با کاراکتر اصلی
+            print("=" * 80)
+            print("METHOD 1: UTF-8 with original character")
+            print("=" * 80)
             self.socket.send(cmd_utf8)
+            response_utf8 = self._receive_response(timeout=5)
+            print(f"Response: {response_utf8}")
+            
+            success_utf8 = (
+                "success" in response_utf8.lower() or
+                "authentication accepted" in response_utf8.lower()
+            )
+            if success_utf8:
+                response = response_utf8
+            else:
+                # روش 2: جایگزینی کاراکتر … با ...
+                print("=" * 80)
+                print("METHOD 2: Replacing … with ...")
+                print("=" * 80)
+                secret_replaced = self.secret.replace('…', '...')
+                print(f"Original secret: {repr(self.secret)}")
+                print(f"Replaced secret: {repr(secret_replaced)}")
+                
+                # اتصال مجدد
+                self.disconnect()
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.socket.settimeout(10)
+                self.socket.connect((self.host, self.port))
+                self._receive_response()  # welcome
+                
+                login_cmd_replaced = (
+                    f"Action: Login\r\n"
+                    f"Username: {self.username}\r\n"
+                    f"Secret: {secret_replaced}\r\n"
+                    f"\r\n"
+                )
+                cmd_replaced_bytes = login_cmd_replaced.encode('utf-8')
+                print(f"Command (replaced): {repr(cmd_replaced_bytes)}")
+                self.socket.send(cmd_replaced_bytes)
+                response_replaced = self._receive_response(timeout=5)
+                print(f"Response: {response_replaced}")
+                
+                success_replaced = (
+                    "success" in response_replaced.lower() or
+                    "authentication accepted" in response_replaced.lower()
+                )
+                if success_replaced:
+                    response = response_replaced
+                else:
+                    # روش 3: Latin-1 (حذف کاراکتر …)
+                    print("=" * 80)
+                    print("METHOD 3: Latin-1 encoding (removing …)")
+                    print("=" * 80)
+                    # حذف کاراکترهای غیر ASCII
+                    secret_latin1 = self.secret.encode(
+                        'latin-1',
+                        errors='ignore'
+                    ).decode('latin-1')
+                    print(f"Latin-1 secret: {repr(secret_latin1)}")
 
-            # دریافت پاسخ احراز هویت (با timeout بیشتر)
-            response = self._receive_response(timeout=5)
+                    # اتصال مجدد
+                    self.disconnect()
+                    self.socket = socket.socket(
+                        socket.AF_INET,
+                        socket.SOCK_STREAM
+                    )
+                    self.socket.settimeout(10)
+                    self.socket.connect((self.host, self.port))
+                    self._receive_response()  # welcome
+
+                    login_cmd_latin1 = (
+                        f"Action: Login\r\n"
+                        f"Username: {self.username}\r\n"
+                        f"Secret: {secret_latin1}\r\n"
+                        f"\r\n"
+                    )
+                    cmd_latin1_bytes = login_cmd_latin1.encode('latin-1')
+                    print(f"Command (Latin-1): {repr(cmd_latin1_bytes)}")
+                    self.socket.send(cmd_latin1_bytes)
+                    response_latin1 = self._receive_response(timeout=5)
+                    print(f"Response: {response_latin1}")
+                    response = response_latin1
             print("=" * 80)
             print("Login Response (FULL):")
             print(response)
