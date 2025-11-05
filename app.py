@@ -2,6 +2,7 @@ import os
 from flask import Flask, jsonify, request
 import psycopg2
 from psycopg2.extras import Json
+from datetime import datetime
 from asterisk_manager import AsteriskManager
 from call_state_machine import CallSessionStateMachine, CallState
 from trunk_config import TrunkConfig
@@ -543,6 +544,298 @@ def init_asterisk_config_table():
         return False
 
 
+def init_call_sessions_table():
+    """ایجاد جدول call_sessions برای ذخیره وضعیت تماس‌ها"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS call_sessions (
+                id SERIAL PRIMARY KEY,
+                session_id VARCHAR(255) UNIQUE NOT NULL,
+                current_state VARCHAR(50) NOT NULL,
+                number_a VARCHAR(50),
+                number_b VARCHAR(50),
+                caller_id VARCHAR(50),
+                trunk_name VARCHAR(255),
+                channel_a_id VARCHAR(255),
+                channel_b_id VARCHAR(255),
+                metadata JSONB,
+                state_history JSONB,
+                state_timestamps JSONB,
+                error_log JSONB,
+                is_final BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
+                duration_seconds INTEGER
+            )
+        """)
+        
+        # ایجاد ایندکس برای جستجوی سریع
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_call_sessions_session_id 
+            ON call_sessions(session_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_call_sessions_current_state 
+            ON call_sessions(current_state)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_call_sessions_created_at 
+            ON call_sessions(created_at)
+        """)
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"خطا در ایجاد جدول call_sessions: {e}")
+        if conn:
+            conn.close()
+        return False
+
+
+def init_call_state_logs_table():
+    """ایجاد جدول call_state_logs برای لاگ کامل تمام تغییرات state"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS call_state_logs (
+                id SERIAL PRIMARY KEY,
+                session_id VARCHAR(255) NOT NULL,
+                state VARCHAR(50) NOT NULL,
+                previous_state VARCHAR(50),
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                metadata JSONB,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # ایجاد ایندکس‌ها
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_call_state_logs_session_id 
+            ON call_state_logs(session_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_call_state_logs_timestamp 
+            ON call_state_logs(timestamp)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_call_state_logs_session_timestamp 
+            ON call_state_logs(session_id, timestamp)
+        """)
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"خطا در ایجاد جدول call_state_logs: {e}")
+        if conn:
+            conn.close()
+        return False
+
+
+def save_call_session(state_machine: CallSessionStateMachine, **kwargs) -> bool:
+    """
+    ذخیره وضعیت تماس در دیتابیس
+    
+    Args:
+        state_machine: ماشین حالت
+        **kwargs: فیلدهای اضافی (number_a, number_b, channel_a_id, etc.)
+    
+    Returns:
+        True اگر موفق باشد
+    """
+    init_call_sessions_table()
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        cursor = conn.cursor()
+        state_data = state_machine.to_dict()
+        
+        # محاسبه duration
+        duration = None
+        if state_data['created_at'] and state_data['updated_at']:
+            from datetime import datetime
+            created = datetime.fromisoformat(state_data['created_at'])
+            updated = datetime.fromisoformat(state_data['updated_at'])
+            duration = int((updated - created).total_seconds())
+        
+        cursor.execute("""
+            INSERT INTO call_sessions (
+                session_id, current_state, number_a, number_b, caller_id,
+                trunk_name, channel_a_id, channel_b_id, metadata,
+                state_history, state_timestamps, error_log, is_final,
+                completed_at, duration_seconds
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (session_id)
+            DO UPDATE SET
+                current_state = EXCLUDED.current_state,
+                number_a = EXCLUDED.number_a,
+                number_b = EXCLUDED.number_b,
+                caller_id = EXCLUDED.caller_id,
+                trunk_name = EXCLUDED.trunk_name,
+                channel_a_id = EXCLUDED.channel_a_id,
+                channel_b_id = EXCLUDED.channel_b_id,
+                metadata = EXCLUDED.metadata,
+                state_history = EXCLUDED.state_history,
+                state_timestamps = EXCLUDED.state_timestamps,
+                error_log = EXCLUDED.error_log,
+                is_final = EXCLUDED.is_final,
+                completed_at = EXCLUDED.completed_at,
+                duration_seconds = EXCLUDED.duration_seconds,
+                updated_at = CURRENT_TIMESTAMP
+        """, (
+            state_machine.session_id,
+            state_machine.current_state.value,
+            kwargs.get('number_a'),
+            kwargs.get('number_b'),
+            kwargs.get('caller_id'),
+            kwargs.get('trunk_name'),
+            kwargs.get('channel_a_id'),
+            kwargs.get('channel_b_id'),
+            Json(state_machine.metadata),
+            Json([s.value for s in state_machine.state_history]),
+            Json(state_machine.state_timestamps),
+            Json(state_machine.error_log),
+            state_machine.is_final_state(),
+            datetime.now().isoformat() if state_machine.is_final_state() else None,
+            duration
+        ))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"خطا در ذخیره call_session: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
+        return False
+
+
+def log_state_change(
+    session_id: str,
+    state: str,
+    previous_state: Optional[str] = None,
+    metadata: Optional[Dict] = None,
+    error_message: Optional[str] = None
+) -> bool:
+    """
+    لاگ کردن تغییر state در جدول call_state_logs
+    
+    Args:
+        session_id: شناسه session
+        state: state جدید
+        previous_state: state قبلی
+        metadata: اطلاعات اضافی
+        error_message: پیام خطا (در صورت وجود)
+    
+    Returns:
+        True اگر موفق باشد
+    """
+    init_call_state_logs_table()
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO call_state_logs (
+                session_id, state, previous_state, metadata, error_message
+            )
+            VALUES (%s, %s, %s, %s, %s)
+        """, (
+            session_id,
+            state,
+            previous_state,
+            Json(metadata or {}),
+            error_message
+        ))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"خطا در لاگ کردن state change: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
+        return False
+
+
+def load_call_session(session_id: str) -> Optional[CallSessionStateMachine]:
+    """
+    بارگذاری وضعیت تماس از دیتابیس
+    
+    Args:
+        session_id: شناسه session
+    
+    Returns:
+        CallSessionStateMachine یا None
+    """
+    init_call_sessions_table()
+    conn = get_db_connection()
+    if not conn:
+        return None
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT current_state, metadata, state_history, state_timestamps, error_log
+            FROM call_sessions
+            WHERE session_id = %s
+        """, (session_id,))
+        
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if not row:
+            return None
+        
+        # بازسازی state machine
+        state_machine = CallSessionStateMachine(
+            initial_state=CallState(row[0]),
+            session_id=session_id,
+            metadata=row[1] or {}
+        )
+        
+        # بازسازی state history
+        if row[2]:
+            state_machine.state_history = [CallState(s) for s in row[2]]
+        
+        # بازسازی timestamps و error log
+        if row[3]:
+            state_machine.state_timestamps = row[3]
+        if row[4]:
+            state_machine.error_log = row[4]
+        
+        return state_machine
+    except Exception as e:
+        print(f"خطا در بارگذاری call_session: {e}")
+        if conn:
+            conn.close()
+        return None
+
+
 def get_asterisk_config_from_db(name: str = 'default'):
     """
     خواندن تنظیمات Asterisk از دیتابیس
@@ -1010,9 +1303,30 @@ def make_call():
                 'message': 'شماره تماس گیرنده و مقصد الزامی است'
             }), 400
 
-        # ایجاد State Machine
-        state_machine = CallSessionStateMachine()
+        # ایجاد State Machine با metadata اولیه
+        state_machine = CallSessionStateMachine(
+            metadata={
+                'number_a': number_a,
+                'number_b': number_b,
+                'caller_id': caller_id,
+                'trunk_name': trunk_name
+            }
+        )
         session_id = state_machine.get_session_id()
+        
+        # ذخیره اولیه در دیتابیس
+        save_call_session(
+            state_machine,
+            number_a=number_a,
+            number_b=number_b,
+            caller_id=caller_id,
+            trunk_name=trunk_name
+        )
+        log_state_change(
+            session_id=session_id,
+            state=CallState.PENDING.value,
+            metadata={'number_a': number_a, 'number_b': number_b}
+        )
 
         # اتصال به Asterisk
         manager = AsteriskManager()
@@ -1072,7 +1386,15 @@ def make_call():
                 print(f"Using default trunk: {actual_trunk_name}")
 
             # شروع تماس: انتقال به حالت CALLING_A
-            state_machine.transition_to(CallState.CALLING_A)
+            state_machine.transition_to(
+                CallState.CALLING_A,
+                metadata={'channel_a': channel_a, 'actual_trunk_name': actual_trunk_name}
+            )
+            save_call_session(state_machine, number_a=number_a, number_b=number_b, 
+                            caller_id=caller_id, trunk_name=actual_trunk_name)
+            log_state_change(session_id, CallState.CALLING_A.value, 
+                           previous_state=CallState.PENDING.value,
+                           metadata={'channel_a': channel_a})
 
             # ساخت کانال برای شماره A
             channel_a = f"SIP/{actual_trunk_name}/{number_a}"
@@ -1094,7 +1416,17 @@ def make_call():
             )
 
             if not success_a:
-                state_machine.transition_to(CallState.FAILED_A)
+                state_machine.transition_to(
+                    CallState.FAILED_A,
+                    error=f"خطا در تماس با {number_a}: {message_a}",
+                    metadata={'channel_a': channel_a, 'error_message': message_a}
+                )
+                save_call_session(state_machine, number_a=number_a, number_b=number_b,
+                                caller_id=caller_id, trunk_name=actual_trunk_name)
+                log_state_change(session_id, CallState.FAILED_A.value,
+                               previous_state=CallState.CALLING_A.value,
+                               error_message=f"خطا در تماس با {number_a}: {message_a}",
+                               metadata={'channel_a': channel_a})
                 return jsonify({
                     'status': 'error',
                     'message': f'خطا در تماس با {number_a}: {message_a}',
@@ -1127,6 +1459,9 @@ def make_call():
                     channel_a_id = channel_a
                     print(f"Warning: Using channel name as Channel A ID: {channel_a_id}")
 
+            # به‌روزرسانی metadata با channel_a_id
+            state_machine.update_metadata(channel_a_id=channel_a_id)
+            
             # منتظر می‌مانیم تا تماس اول پاسخ دهد
             # در واقعیت، باید از Events استفاده کنیم تا بفهمیم تماس پاسخ داده است
             # برای حالا، یک تاخیر کوتاه اضافه می‌کنیم تا کاربر پاسخ دهد
@@ -1135,13 +1470,31 @@ def make_call():
             time.sleep(5)  # منتظر می‌مانیم تا کاربر پاسخ دهد
             
             # انتقال به حالت CONNECTED_A (پس از پاسخ)
-            state_machine.transition_to(CallState.CONNECTED_A)
+            state_machine.transition_to(
+                CallState.CONNECTED_A,
+                metadata={'channel_a_id': channel_a_id}
+            )
+            save_call_session(state_machine, number_a=number_a, number_b=number_b,
+                            caller_id=caller_id, trunk_name=actual_trunk_name,
+                            channel_a_id=channel_a_id)
+            log_state_change(session_id, CallState.CONNECTED_A.value,
+                           previous_state=CallState.CALLING_A.value,
+                           metadata={'channel_a_id': channel_a_id})
 
             # تماس با شماره B و سپس bridge کردن
             # از لاگ Simotel مشخص است که Dial به شماره دوم انجام می‌شود و خودش bridge می‌کند
             # اما ما از AMI استفاده می‌کنیم و نمی‌توانیم Dial را روی channel موجود اجرا کنیم
             # پس باید تماس دوم را برقرار کنیم و سپس bridge کنیم
-            state_machine.transition_to(CallState.CALLING_B)
+            state_machine.transition_to(
+                CallState.CALLING_B,
+                metadata={'channel_b': channel_b}
+            )
+            save_call_session(state_machine, number_a=number_a, number_b=number_b,
+                            caller_id=caller_id, trunk_name=actual_trunk_name,
+                            channel_a_id=channel_a_id)
+            log_state_change(session_id, CallState.CALLING_B.value,
+                           previous_state=CallState.CONNECTED_A.value,
+                           metadata={'channel_b': channel_b})
             channel_b = f"SIP/{actual_trunk_name}/{number_b}"
 
             # برقراری تماس دوم
@@ -1154,7 +1507,19 @@ def make_call():
             )
 
             if not success_b:
-                state_machine.transition_to(CallState.FAILED_B)
+                state_machine.transition_to(
+                    CallState.FAILED_B,
+                    error=f"خطا در تماس با {number_b}: {message_b}",
+                    metadata={'channel_b': channel_b, 'channel_a_id': channel_a_id, 
+                            'error_message': message_b}
+                )
+                save_call_session(state_machine, number_a=number_a, number_b=number_b,
+                                caller_id=caller_id, trunk_name=actual_trunk_name,
+                                channel_a_id=channel_a_id)
+                log_state_change(session_id, CallState.FAILED_B.value,
+                               previous_state=CallState.CALLING_B.value,
+                               error_message=f"خطا در تماس با {number_b}: {message_b}",
+                               metadata={'channel_b': channel_b, 'channel_a_id': channel_a_id})
                 return jsonify({
                     'status': 'error',
                     'message': f'خطا در تماس با {number_b}: {message_b}',
@@ -1185,6 +1550,9 @@ def make_call():
                     channel_b_id = channel_b
                     print(f"Warning: Using channel name as Channel B ID: {channel_b_id}")
 
+            # به‌روزرسانی metadata با channel_b_id
+            state_machine.update_metadata(channel_b_id=channel_b_id)
+            
             # منتظر می‌مانیم تا تماس دوم پاسخ دهد
             print(f"Waiting for {number_b} to answer...")
             time.sleep(5)  # منتظر می‌مانیم تا کاربر پاسخ دهد
@@ -1197,7 +1565,19 @@ def make_call():
             )
 
             if not success_bridge:
-                state_machine.transition_to(CallState.FAILED_B)
+                state_machine.transition_to(
+                    CallState.FAILED_B,
+                    error=f"خطا در bridge کردن: {bridge_message}",
+                    metadata={'channel_a_id': channel_a_id, 'channel_b_id': channel_b_id,
+                            'error_message': bridge_message}
+                )
+                save_call_session(state_machine, number_a=number_a, number_b=number_b,
+                                caller_id=caller_id, trunk_name=actual_trunk_name,
+                                channel_a_id=channel_a_id, channel_b_id=channel_b_id)
+                log_state_change(session_id, CallState.FAILED_B.value,
+                               previous_state=CallState.CALLING_B.value,
+                               error_message=f"خطا در bridge کردن: {bridge_message}",
+                               metadata={'channel_a_id': channel_a_id, 'channel_b_id': channel_b_id})
                 return jsonify({
                     'status': 'error',
                     'message': f'خطا در bridge کردن: {bridge_message}',
@@ -1210,7 +1590,16 @@ def make_call():
                 }), 500
 
             # انتقال به حالت BRIDGED
-            state_machine.transition_to(CallState.BRIDGED)
+            state_machine.transition_to(
+                CallState.BRIDGED,
+                metadata={'channel_a_id': channel_a_id, 'channel_b_id': channel_b_id}
+            )
+            save_call_session(state_machine, number_a=number_a, number_b=number_b,
+                            caller_id=caller_id, trunk_name=actual_trunk_name,
+                            channel_a_id=channel_a_id, channel_b_id=channel_b_id)
+            log_state_change(session_id, CallState.BRIDGED.value,
+                           previous_state=CallState.CALLING_B.value,
+                           metadata={'channel_a_id': channel_a_id, 'channel_b_id': channel_b_id})
 
             return jsonify({
                 'status': 'success',
