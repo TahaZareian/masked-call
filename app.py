@@ -1,11 +1,13 @@
 import os
+import uuid
 from flask import Flask, jsonify, request
 import psycopg2
 from psycopg2.extras import Json
 from typing import Optional, Dict
+from datetime import datetime
 from asterisk_manager import AsteriskManager
 from call_state_machine import CallSessionStateMachine, CallState
-from trunk_config import TrunkConfig
+from order_state_machine import OrderStateMachine, OrderState
 
 app = Flask(__name__)
 
@@ -51,441 +53,10 @@ def get_db_connection():
         return None
 
 
-def get_tables():
-    """دریافت لیست جداول از دیتابیس"""
-    conn = get_db_connection()
-    if conn is None:
-        return []
+# ==================== Database Schema ====================
 
-    try:
-        cursor = conn.cursor()
-        # کوئری برای دریافت لیست جداول
-        query = """
-            SELECT table_name
-            FROM information_schema.tables
-            WHERE table_schema = 'public'
-            ORDER BY table_name;
-        """
-        cursor.execute(query)
-        tables = [row[0] for row in cursor.fetchall()]
-        cursor.close()
-        conn.close()
-        return tables
-    except Exception as e:
-        print(f"خطا در دریافت جداول: {e}")
-        if conn:
-            conn.close()
-        return []
-
-
-@app.route('/')
-def hello():
-    """صفحه اصلی با نمایش پیام خوش‌آمدگویی و لیست جداول"""
-    tables = get_tables()
-    return jsonify({
-        'message': 'سلام! خوش آمدید',
-        'status': 'success',
-        'tables': tables,
-        'tables_count': len(tables)
-    })
-
-
-@app.route('/health')
-def health():
-    """بررسی سلامت سرویس"""
-    return jsonify({'status': 'healthy'})
-
-
-@app.route('/is-ready')
-def is_ready():
-    """بررسی آماده‌بودن سرویس"""
-    # بررسی وجود environment variables
-    db_host = os.getenv('DB_HOST')
-    db_port = os.getenv('DB_PORT')
-    db_name = os.getenv('DB_NAME')
-    db_user = os.getenv('DB_USER')
-    db_password = os.getenv('DB_PASSWORD')
-
-    if not all([db_host, db_port, db_name, db_user, db_password]):
-        return jsonify({
-            'status': 'not ready',
-            'reason': 'missing environment variables'
-        }), 503
-
-    # اگر environment variables تنظیم شده‌اند، اپلیکیشن آماده است
-    return jsonify({'status': 'ready'}), 200
-
-
-@app.route('/api/system/my-ip', methods=['GET'])
-def get_my_ip():
-    """دریافت IP واقعی سرور برای اضافه کردن به permit list"""
-    try:
-        import socket
-        # اتصال به یک سرور خارجی برای دریافت IP
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            # اتصال به یک سرور (نیازی به اتصال واقعی نیست)
-            s.connect(('8.8.8.8', 80))
-            ip = s.getsockname()[0]
-        except Exception:
-            ip = 'unknown'
-        finally:
-            s.close()
-
-        return jsonify({
-            'status': 'success',
-            'my_ip': ip,
-            'message': (
-                'این IP را به permit list در Issabel اضافه کنید: '
-                f'permit={ip}/32'
-            )
-        }), 200
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'خطا: {str(e)}'
-        }), 500
-
-
-@app.route('/api/asterisk/test-connection', methods=['POST'])
-def test_asterisk_connection():
-    """تست اتصال به سرور Asterisk بدون احراز هویت"""
-    try:
-        import socket
-        data = request.get_json() or {}
-        host = data.get('host') or os.getenv('ASTERISK_HOST')
-        port = int(data.get('port', os.getenv('ASTERISK_PORT', '5038')))
-
-        if not host:
-            return jsonify({
-                'status': 'error',
-                'message': 'host مشخص نشده است'
-            }), 400
-
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            result = sock.connect_ex((host, port))
-            sock.close()
-
-            if result == 0:
-                return jsonify({
-                    'status': 'success',
-                    'message': f'پورت {port} روی {host} باز است',
-                    'host': host,
-                    'port': port
-                }), 200
-            else:
-                return jsonify({
-                    'status': 'error',
-                    'message': f'پورت {port} روی {host} بسته است یا در دسترس نیست',
-                    'host': host,
-                    'port': port
-                }), 500
-        except socket.timeout:
-            return jsonify({
-                'status': 'error',
-                'message': f'Timeout: نمی‌توان به {host}:{port} متصل شد',
-                'host': host,
-                'port': port
-            }), 500
-        except Exception as e:
-            return jsonify({
-                'status': 'error',
-                'message': f'خطا: {str(e)}',
-                'host': host,
-                'port': port
-            }), 500
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'خطا: {str(e)}'
-        }), 500
-
-
-@app.route('/api/asterisk/connect', methods=['POST'])
-def asterisk_connect():
-    """اتصال به سرور Asterisk"""
-    try:
-        # خواندن تنظیمات از دیتابیس
-        manager = AsteriskManager()
-        
-        print("=" * 80)
-        print("CONNECTING TO ASTERISK:")
-        print(f"Host: {manager.host}")
-        print(f"Port: {manager.port}")
-        print(f"Username: {manager.username}")
-        secret_length = len(manager.secret) if manager.secret else 0
-        secret_repr = repr(manager.secret) if manager.secret else 'None'
-        print(f"Secret length: {secret_length}")
-        print(f"Secret repr: {secret_repr}")
-        print("=" * 80)
-        
-        # بررسی تنظیمات
-        missing_vars = []
-        if not manager.host:
-            missing_vars.append('ASTERISK_HOST')
-        if not manager.port:
-            missing_vars.append('ASTERISK_PORT')
-        if not manager.username:
-            missing_vars.append('ASTERISK_USERNAME')
-        if not manager.secret:
-            missing_vars.append('ASTERISK_SECRET')
-        
-        if missing_vars:
-            return jsonify({
-                'status': 'error',
-                'message': 'تنظیمات Asterisk کامل نیست',
-                'missing_variables': missing_vars,
-                'current_config': {
-                    'host': manager.host or 'not_set',
-                    'port': manager.port or 'not_set',
-                    'username': manager.username or 'not_set',
-                    'secret': '***' if manager.secret else 'not_set'
-                }
-            }), 400
-        
-        success, error_message = manager.connect()
-        if success:
-            manager.disconnect()
-            return jsonify({
-                'status': 'success',
-                'message': 'اتصال به Asterisk موفق بود',
-                'config': {
-                    'host': manager.host,
-                    'port': manager.port,
-                    'username': manager.username
-                }
-            }), 200
-        else:
-            # بررسی اگر خطای احراز هویت است، راهنمایی بده
-            troubleshooting = ""
-            if "authentication failed" in error_message.lower():
-                troubleshooting = (
-                    "خطا: احراز هویت ناموفق. "
-                    "ممکن است IP شما در permit list نباشد. "
-                    "در فایل manager.conf در Issabel، IP سرور خود را به permit list اضافه کنید: "
-                    "permit=193.151.147.135/32"
-                )
-
-            return jsonify({
-                'status': 'error',
-                'message': 'اتصال به Asterisk ناموفق بود',
-                'error_details': error_message,
-                'config_used': {
-                    'host': manager.host,
-                    'port': manager.port,
-                    'username': manager.username,
-                    'secret': '***'
-                },
-                'troubleshooting': troubleshooting if troubleshooting else None
-            }), 500
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'خطا: {str(e)}',
-            'error_type': type(e).__name__
-        }), 500
-
-
-@app.route('/api/asterisk/config', methods=['GET'])
-def get_asterisk_config():
-    """
-    بررسی تنظیمات Asterisk
-    ابتدا از دیتابیس می‌خواند، سپس از environment variables
-    """
-    config_name = request.args.get('name', 'default')
-    source = None
-    config = None
-
-    # اول از دیتابیس بخوان
-    db_config = get_asterisk_config_from_db(config_name)
-    if db_config:
-        config = db_config
-        source = 'database'
-    else:
-        # اگر در دیتابیس نبود، از environment variables بخوان
-        asterisk_host = os.getenv('ASTERISK_HOST')
-        asterisk_port = os.getenv('ASTERISK_PORT', '5038')
-        asterisk_username = os.getenv('ASTERISK_USERNAME')
-        asterisk_secret = os.getenv('ASTERISK_SECRET')
-
-        if all([
-            asterisk_host,
-            asterisk_port,
-            asterisk_username,
-            asterisk_secret
-        ]):
-            config = {
-                'host': asterisk_host,
-                'port': int(asterisk_port),
-                'username': asterisk_username,
-                'secret': asterisk_secret
-            }
-            source = 'environment'
-
-    if not config:
-        return jsonify({
-            'status': 'error',
-            'message': 'تنظیمات Asterisk یافت نشد'
-        }), 404
-
-    config_status = {
-        'host': config.get('host'),
-        'port': config.get('port'),
-        'username': config.get('username'),
-        'secret': '***' if config.get('secret') else None,
-        'source': source,
-        'all_configured': all([
-            config.get('host'),
-            config.get('port'),
-            config.get('username'),
-            config.get('secret')
-        ])
-    }
-
-    return jsonify({
-        'status': 'success',
-        'config': config_status
-    }), 200
-
-
-@app.route('/api/asterisk/config', methods=['POST'])
-def save_asterisk_config():
-    """ذخیره تنظیمات Asterisk در دیتابیس"""
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({
-                'status': 'error',
-                'message': 'اطلاعات ارسالی نامعتبر است'
-            }), 400
-
-        config_name = data.get('name', 'default')
-        host = data.get('host')
-        port = data.get('port', 5038)
-        username = data.get('username')
-        secret = data.get('secret')
-
-        if not all([host, port, username, secret]):
-            return jsonify({
-                'status': 'error',
-                'message': 'اطلاعات ناقص است'
-            }), 400
-
-        # ذخیره در دیتابیس
-        init_asterisk_config_table()
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({
-                'status': 'error',
-                'message': 'خطا در اتصال به دیتابیس'
-            }), 500
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO asterisk_config
-                (name, host, port, username, secret)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (name)
-                DO UPDATE SET
-                    host = EXCLUDED.host,
-                    port = EXCLUDED.port,
-                    username = EXCLUDED.username,
-                    secret = EXCLUDED.secret,
-                    updated_at = CURRENT_TIMESTAMP
-                RETURNING id, created_at, updated_at
-            """, (config_name, host, port, username, secret))
-
-            result = cursor.fetchone()
-            conn.commit()
-            cursor.close()
-            conn.close()
-
-            return jsonify({
-                'status': 'success',
-                'message': f'تنظیمات Asterisk با نام "{config_name}" ذخیره شد',
-                'config': {
-                    'name': config_name,
-                    'id': result[0],
-                    'created_at': result[1].isoformat(),
-                    'updated_at': result[2].isoformat()
-                }
-            }), 200
-        except Exception as e:
-            if conn:
-                conn.rollback()
-                conn.close()
-            return jsonify({
-                'status': 'error',
-                'message': f'خطا در ذخیره تنظیمات: {str(e)}'
-            }), 500
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'خطا: {str(e)}'
-        }), 500
-
-
-@app.route('/api/asterisk/trunks', methods=['GET'])
-def list_trunks():
-    """دریافت لیست trunk‌ها"""
-    try:
-        manager = AsteriskManager()
-        success, error_msg = manager.connect()
-        if not success:
-            return jsonify({
-                'status': 'error',
-                'message': 'امکان اتصال به Asterisk وجود ندارد',
-                'error_details': error_msg
-            }), 500
-
-        trunks = manager.list_trunks()
-        manager.disconnect()
-
-        return jsonify({
-            'status': 'success',
-            'trunks': trunks,
-            'count': len(trunks)
-        }), 200
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'خطا: {str(e)}'
-        }), 500
-
-
-@app.route('/api/asterisk/trunk/<trunk_name>', methods=['GET'])
-def get_trunk_status(trunk_name):
-    """دریافت وضعیت یک trunk"""
-    try:
-        manager = AsteriskManager()
-        success, error_msg = manager.connect()
-        if not success:
-            return jsonify({
-                'status': 'error',
-                'message': 'امکان اتصال به Asterisk وجود ندارد',
-                'error_details': error_msg
-            }), 500
-
-        status = manager.get_trunk_status(trunk_name)
-        manager.disconnect()
-
-        return jsonify({
-            'status': 'success',
-            'trunk': trunk_name,
-            'info': status
-        }), 200
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'خطا: {str(e)}'
-        }), 500
-
-
-def init_trunks_table():
-    """ایجاد جدول trunks در دیتابیس در صورت عدم وجود"""
+def init_orders_table():
+    """ایجاد جدول orders برای ذخیره سفارش‌های تماس (مشابه تراکنش در درگاه پرداخت)"""
     conn = get_db_connection()
     if not conn:
         return False
@@ -493,28 +64,64 @@ def init_trunks_table():
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS trunks (
+            CREATE TABLE IF NOT EXISTS orders (
                 id SERIAL PRIMARY KEY,
-                name VARCHAR(255) UNIQUE NOT NULL,
-                config JSONB NOT NULL,
-                asterisk_config TEXT,
+                order_id VARCHAR(255) UNIQUE NOT NULL,
+                current_state VARCHAR(50) NOT NULL,
+                user_token VARCHAR(255),
+                number_a VARCHAR(50),
+                number_b VARCHAR(50),
+                caller_id VARCHAR(50),
+                trunk_name VARCHAR(255),
+                call_id VARCHAR(255),
+                metadata JSONB,
+                state_history JSONB,
+                state_timestamps JSONB,
+                error_log JSONB,
+                is_final BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
+                failed_at TIMESTAMP,
+                cancelled_at TIMESTAMP
             )
         """)
+        
+        # ایجاد ایندکس‌ها
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_orders_order_id 
+            ON orders(order_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_orders_current_state 
+            ON orders(current_state)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_orders_user_token 
+            ON orders(user_token)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_orders_call_id 
+            ON orders(call_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_orders_created_at 
+            ON orders(created_at)
+        """)
+        
         conn.commit()
         cursor.close()
         conn.close()
         return True
     except Exception as e:
-        print(f"خطا در ایجاد جدول trunks: {e}")
+        print(f"خطا در ایجاد جدول orders: {e}")
         if conn:
             conn.close()
         return False
 
 
-def init_asterisk_config_table():
-    """ایجاد جدول asterisk_config در دیتابیس در صورت عدم وجود"""
+def init_calls_table():
+    """ایجاد جدول calls برای ذخیره تماس‌های واقعی (مشابه پرداخت در درگاه)"""
     conn = get_db_connection()
     if not conn:
         return False
@@ -522,40 +129,10 @@ def init_asterisk_config_table():
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS asterisk_config (
+            CREATE TABLE IF NOT EXISTS calls (
                 id SERIAL PRIMARY KEY,
-                name VARCHAR(255) UNIQUE NOT NULL DEFAULT 'default',
-                host VARCHAR(255),
-                port INTEGER DEFAULT 5038,
-                username VARCHAR(255),
-                secret VARCHAR(255),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"خطا در ایجاد جدول asterisk_config: {e}")
-        if conn:
-            conn.close()
-        return False
-
-
-def init_call_sessions_table():
-    """ایجاد جدول call_sessions برای ذخیره وضعیت تماس‌ها"""
-    conn = get_db_connection()
-    if not conn:
-        return False
-
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS call_sessions (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(255) UNIQUE NOT NULL,
+                call_id VARCHAR(255) UNIQUE NOT NULL,
+                order_id VARCHAR(255),
                 current_state VARCHAR(50) NOT NULL,
                 number_a VARCHAR(50),
                 number_b VARCHAR(50),
@@ -570,23 +147,31 @@ def init_call_sessions_table():
                 is_final BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                started_at TIMESTAMP,
+                answered_at TIMESTAMP,
+                bridged_at TIMESTAMP,
                 completed_at TIMESTAMP,
+                failed_at TIMESTAMP,
                 duration_seconds INTEGER
             )
         """)
         
-        # ایجاد ایندکس برای جستجوی سریع
+        # ایجاد ایندکس‌ها
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_call_sessions_session_id 
-            ON call_sessions(session_id)
+            CREATE INDEX IF NOT EXISTS idx_calls_call_id 
+            ON calls(call_id)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_call_sessions_current_state 
-            ON call_sessions(current_state)
+            CREATE INDEX IF NOT EXISTS idx_calls_order_id 
+            ON calls(order_id)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_call_sessions_created_at 
-            ON call_sessions(created_at)
+            CREATE INDEX IF NOT EXISTS idx_calls_current_state 
+            ON calls(current_state)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_calls_created_at 
+            ON calls(created_at)
         """)
         
         conn.commit()
@@ -594,14 +179,14 @@ def init_call_sessions_table():
         conn.close()
         return True
     except Exception as e:
-        print(f"خطا در ایجاد جدول call_sessions: {e}")
+        print(f"خطا در ایجاد جدول calls: {e}")
         if conn:
             conn.close()
         return False
 
 
-def init_call_state_logs_table():
-    """ایجاد جدول call_state_logs برای لاگ کامل تمام تغییرات state"""
+def init_events_table():
+    """ایجاد جدول events برای Event-based tracking (مشابه webhook در درگاه پرداخت)"""
     conn = get_db_connection()
     if not conn:
         return False
@@ -609,30 +194,47 @@ def init_call_state_logs_table():
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS call_state_logs (
+            CREATE TABLE IF NOT EXISTS events (
                 id SERIAL PRIMARY KEY,
-                session_id VARCHAR(255) NOT NULL,
-                state VARCHAR(50) NOT NULL,
+                event_id VARCHAR(255) UNIQUE NOT NULL,
+                event_type VARCHAR(50) NOT NULL,
+                entity_type VARCHAR(50) NOT NULL,
+                entity_id VARCHAR(255) NOT NULL,
+                order_id VARCHAR(255),
+                call_id VARCHAR(255),
+                state VARCHAR(50),
                 previous_state VARCHAR(50),
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 metadata JSONB,
                 error_message TEXT,
+                processed BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
         # ایجاد ایندکس‌ها
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_call_state_logs_session_id 
-            ON call_state_logs(session_id)
+            CREATE INDEX IF NOT EXISTS idx_events_event_id 
+            ON events(event_id)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_call_state_logs_timestamp 
-            ON call_state_logs(timestamp)
+            CREATE INDEX IF NOT EXISTS idx_events_entity 
+            ON events(entity_type, entity_id)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_call_state_logs_session_timestamp 
-            ON call_state_logs(session_id, timestamp)
+            CREATE INDEX IF NOT EXISTS idx_events_order_id 
+            ON events(order_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_call_id 
+            ON events(call_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_created_at 
+            ON events(created_at)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_processed 
+            ON events(processed)
         """)
         
         conn.commit()
@@ -640,53 +242,146 @@ def init_call_state_logs_table():
         conn.close()
         return True
     except Exception as e:
-        print(f"خطا در ایجاد جدول call_state_logs: {e}")
+        print(f"خطا در ایجاد جدول events: {e}")
         if conn:
             conn.close()
         return False
 
 
-def save_call_session(state_machine: CallSessionStateMachine, **kwargs) -> bool:
-    """
-    ذخیره وضعیت تماس در دیتابیس
-    
-    Args:
-        state_machine: ماشین حالت
-        **kwargs: فیلدهای اضافی (number_a, number_b, channel_a_id, etc.)
-    
-    Returns:
-        True اگر موفق باشد
-    """
-    init_call_sessions_table()
+# ==================== Database Operations ====================
+
+def save_order(order_state_machine: OrderStateMachine, **kwargs) -> bool:
+    """ذخیره سفارش در دیتابیس"""
+    init_orders_table()
     conn = get_db_connection()
     if not conn:
         return False
     
     try:
         cursor = conn.cursor()
-        state_data = state_machine.to_dict()
+        state_data = order_state_machine.to_dict()
+        
+        # تعیین timestamp های خاص
+        completed_at = None
+        failed_at = None
+        cancelled_at = None
+        
+        if order_state_machine.current_state == OrderState.COMPLETED:
+            completed_at = datetime.now().isoformat()
+        elif order_state_machine.current_state == OrderState.FAILED:
+            failed_at = datetime.now().isoformat()
+        elif order_state_machine.current_state == OrderState.CANCELLED:
+            cancelled_at = datetime.now().isoformat()
+        
+        cursor.execute("""
+            INSERT INTO orders (
+                order_id, current_state, user_token, number_a, number_b,
+                caller_id, trunk_name, call_id, metadata,
+                state_history, state_timestamps, error_log, is_final,
+                completed_at, failed_at, cancelled_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (order_id)
+            DO UPDATE SET
+                current_state = EXCLUDED.current_state,
+                user_token = EXCLUDED.user_token,
+                number_a = EXCLUDED.number_a,
+                number_b = EXCLUDED.number_b,
+                caller_id = EXCLUDED.caller_id,
+                trunk_name = EXCLUDED.trunk_name,
+                call_id = EXCLUDED.call_id,
+                metadata = EXCLUDED.metadata,
+                state_history = EXCLUDED.state_history,
+                state_timestamps = EXCLUDED.state_timestamps,
+                error_log = EXCLUDED.error_log,
+                is_final = EXCLUDED.is_final,
+                completed_at = EXCLUDED.completed_at,
+                failed_at = EXCLUDED.failed_at,
+                cancelled_at = EXCLUDED.cancelled_at,
+                updated_at = CURRENT_TIMESTAMP
+        """, (
+            order_state_machine.order_id,
+            order_state_machine.current_state.value,
+            kwargs.get('user_token'),
+            kwargs.get('number_a'),
+            kwargs.get('number_b'),
+            kwargs.get('caller_id'),
+            kwargs.get('trunk_name'),
+            order_state_machine.call_id,
+            Json(order_state_machine.metadata),
+            Json([s.value for s in order_state_machine.state_history]),
+            Json(order_state_machine.state_timestamps),
+            Json(order_state_machine.error_log),
+            order_state_machine.is_final_state(),
+            completed_at,
+            failed_at,
+            cancelled_at
+        ))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"خطا در ذخیره order: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
+        return False
+
+
+def save_call(call_state_machine: CallSessionStateMachine, order_id: str, **kwargs) -> bool:
+    """ذخیره تماس واقعی در دیتابیس"""
+    init_calls_table()
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        cursor = conn.cursor()
+        state_data = call_state_machine.to_dict()
+        
+        # تعیین timestamp های خاص
+        started_at = None
+        answered_at = None
+        bridged_at = None
+        completed_at = None
+        failed_at = None
+        duration = None
         
         # محاسبه duration
-        duration = None
         if state_data['created_at'] and state_data['updated_at']:
             try:
-                from datetime import datetime as dt
-                created = dt.fromisoformat(state_data['created_at'])
-                updated = dt.fromisoformat(state_data['updated_at'])
+                created = datetime.fromisoformat(state_data['created_at'])
+                updated = datetime.fromisoformat(state_data['updated_at'])
                 duration = int((updated - created).total_seconds())
             except Exception:
                 duration = None
         
+        # تعیین timestamp های خاص بر اساس state
+        if call_state_machine.current_state == CallState.CALLING_A:
+            started_at = datetime.now().isoformat()
+        elif call_state_machine.current_state == CallState.CONNECTED_A:
+            answered_at = datetime.now().isoformat()
+        elif call_state_machine.current_state == CallState.BRIDGED:
+            bridged_at = datetime.now().isoformat()
+        elif call_state_machine.current_state == CallState.COMPLETED:
+            completed_at = datetime.now().isoformat()
+        elif call_state_machine.current_state in [CallState.FAILED_A, CallState.FAILED_B, CallState.FAILED_SYSTEM]:
+            failed_at = datetime.now().isoformat()
+        
         cursor.execute("""
-            INSERT INTO call_sessions (
-                session_id, current_state, number_a, number_b, caller_id,
-                trunk_name, channel_a_id, channel_b_id, metadata,
+            INSERT INTO calls (
+                call_id, order_id, current_state, number_a, number_b,
+                caller_id, trunk_name, channel_a_id, channel_b_id, metadata,
                 state_history, state_timestamps, error_log, is_final,
-                completed_at, duration_seconds
+                started_at, answered_at, bridged_at, completed_at, failed_at,
+                duration_seconds
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (session_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (call_id)
             DO UPDATE SET
+                order_id = EXCLUDED.order_id,
                 current_state = EXCLUDED.current_state,
                 number_a = EXCLUDED.number_a,
                 number_b = EXCLUDED.number_b,
@@ -699,24 +394,33 @@ def save_call_session(state_machine: CallSessionStateMachine, **kwargs) -> bool:
                 state_timestamps = EXCLUDED.state_timestamps,
                 error_log = EXCLUDED.error_log,
                 is_final = EXCLUDED.is_final,
+                started_at = EXCLUDED.started_at,
+                answered_at = EXCLUDED.answered_at,
+                bridged_at = EXCLUDED.bridged_at,
                 completed_at = EXCLUDED.completed_at,
+                failed_at = EXCLUDED.failed_at,
                 duration_seconds = EXCLUDED.duration_seconds,
                 updated_at = CURRENT_TIMESTAMP
         """, (
-            state_machine.session_id,
-            state_machine.current_state.value,
+            call_state_machine.session_id,
+            order_id,
+            call_state_machine.current_state.value,
             kwargs.get('number_a'),
             kwargs.get('number_b'),
             kwargs.get('caller_id'),
             kwargs.get('trunk_name'),
             kwargs.get('channel_a_id'),
             kwargs.get('channel_b_id'),
-            Json(state_machine.metadata),
-            Json([s.value for s in state_machine.state_history]),
-            Json(state_machine.state_timestamps),
-            Json(state_machine.error_log),
-            state_machine.is_final_state(),
-            None,  # completed_at توسط database خودش set می‌شود
+            Json(call_state_machine.metadata),
+            Json([s.value for s in call_state_machine.state_history]),
+            Json(call_state_machine.state_timestamps),
+            Json(call_state_machine.error_log),
+            call_state_machine.is_final_state(),
+            started_at,
+            answered_at,
+            bridged_at,
+            completed_at,
+            failed_at,
             duration
         ))
         
@@ -725,47 +429,48 @@ def save_call_session(state_machine: CallSessionStateMachine, **kwargs) -> bool:
         conn.close()
         return True
     except Exception as e:
-        print(f"خطا در ذخیره call_session: {e}")
+        print(f"خطا در ذخیره call: {e}")
         if conn:
             conn.rollback()
             conn.close()
         return False
 
 
-def log_state_change(
-    session_id: str,
-    state: str,
+def create_event(
+    event_type: str,
+    entity_type: str,
+    entity_id: str,
+    order_id: Optional[str] = None,
+    call_id: Optional[str] = None,
+    state: Optional[str] = None,
     previous_state: Optional[str] = None,
     metadata: Optional[Dict] = None,
     error_message: Optional[str] = None
 ) -> bool:
-    """
-    لاگ کردن تغییر state در جدول call_state_logs
-    
-    Args:
-        session_id: شناسه session
-        state: state جدید
-        previous_state: state قبلی
-        metadata: اطلاعات اضافی
-        error_message: پیام خطا (در صورت وجود)
-    
-    Returns:
-        True اگر موفق باشد
-    """
-    init_call_state_logs_table()
+    """ایجاد event (مشابه webhook در درگاه پرداخت)"""
+    init_events_table()
     conn = get_db_connection()
     if not conn:
         return False
     
     try:
         cursor = conn.cursor()
+        event_id = str(uuid.uuid4())
+        
         cursor.execute("""
-            INSERT INTO call_state_logs (
-                session_id, state, previous_state, metadata, error_message
+            INSERT INTO events (
+                event_id, event_type, entity_type, entity_id,
+                order_id, call_id, state, previous_state,
+                metadata, error_message
             )
-            VALUES (%s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            session_id,
+            event_id,
+            event_type,
+            entity_type,
+            entity_id,
+            order_id,
+            call_id,
             state,
             previous_state,
             Json(metadata or {}),
@@ -777,24 +482,16 @@ def log_state_change(
         conn.close()
         return True
     except Exception as e:
-        print(f"خطا در لاگ کردن state change: {e}")
+        print(f"خطا در ایجاد event: {e}")
         if conn:
             conn.rollback()
             conn.close()
         return False
 
 
-def load_call_session(session_id: str) -> Optional[CallSessionStateMachine]:
-    """
-    بارگذاری وضعیت تماس از دیتابیس
-    
-    Args:
-        session_id: شناسه session
-    
-    Returns:
-        CallSessionStateMachine یا None
-    """
-    init_call_sessions_table()
+def load_order(order_id: str) -> Optional[OrderStateMachine]:
+    """بارگذاری سفارش از دیتابیس"""
+    init_orders_table()
     conn = get_db_connection()
     if not conn:
         return None
@@ -802,10 +499,11 @@ def load_call_session(session_id: str) -> Optional[CallSessionStateMachine]:
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT current_state, metadata, state_history, state_timestamps, error_log
-            FROM call_sessions
-            WHERE session_id = %s
-        """, (session_id,))
+            SELECT current_state, user_token, number_a, number_b, caller_id,
+                   trunk_name, call_id, metadata, state_history, state_timestamps, error_log
+            FROM orders
+            WHERE order_id = %s
+        """, (order_id,))
         
         row = cursor.fetchone()
         cursor.close()
@@ -814,481 +512,102 @@ def load_call_session(session_id: str) -> Optional[CallSessionStateMachine]:
         if not row:
             return None
         
-        # بازسازی state machine
-        state_machine = CallSessionStateMachine(
+        # بازسازی order state machine
+        order_state_machine = OrderStateMachine(
+            initial_state=OrderState(row[0]),
+            order_id=order_id,
+            metadata=row[7] or {}
+        )
+        
+        # بازسازی state history
+        if row[8]:
+            order_state_machine.state_history = [OrderState(s) for s in row[8]]
+        
+        # بازسازی timestamps و error log
+        if row[9]:
+            order_state_machine.state_timestamps = row[9]
+        if row[10]:
+            order_state_machine.error_log = row[10]
+        
+        # تنظیم call_id
+        if row[6]:
+            order_state_machine.set_call_id(row[6])
+        
+        return order_state_machine
+    except Exception as e:
+        print(f"خطا در بارگذاری order: {e}")
+        if conn:
+            conn.close()
+        return None
+
+
+def load_call(call_id: str) -> Optional[CallSessionStateMachine]:
+    """بارگذاری تماس از دیتابیس"""
+    init_calls_table()
+    conn = get_db_connection()
+    if not conn:
+        return None
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT current_state, metadata, state_history, state_timestamps, error_log
+            FROM calls
+            WHERE call_id = %s
+        """, (call_id,))
+        
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if not row:
+            return None
+        
+        # بازسازی call state machine
+        call_state_machine = CallSessionStateMachine(
             initial_state=CallState(row[0]),
-            session_id=session_id,
+            session_id=call_id,
             metadata=row[1] or {}
         )
         
         # بازسازی state history
         if row[2]:
-            state_machine.state_history = [CallState(s) for s in row[2]]
+            call_state_machine.state_history = [CallState(s) for s in row[2]]
         
         # بازسازی timestamps و error log
         if row[3]:
-            state_machine.state_timestamps = row[3]
+            call_state_machine.state_timestamps = row[3]
         if row[4]:
-            state_machine.error_log = row[4]
+            call_state_machine.error_log = row[4]
         
-        return state_machine
+        return call_state_machine
     except Exception as e:
-        print(f"خطا در بارگذاری call_session: {e}")
+        print(f"خطا در بارگذاری call: {e}")
         if conn:
             conn.close()
         return None
 
 
-def get_asterisk_config_from_db(name: str = 'default'):
+# ==================== API Endpoints ====================
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint"""
+    return jsonify({'status': 'ok'}), 200
+
+
+@app.route('/api/order/create', methods=['POST'])
+def create_order():
     """
-    خواندن تنظیمات Asterisk از دیتابیس
-
-    Args:
-        name: نام پیکربندی (پیش‌فرض: 'default')
-
-    Returns:
-        دیکشنری تنظیمات یا None
-    """
-    init_asterisk_config_table()
-    conn = get_db_connection()
-    if not conn:
-        return None
-
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT host, port, username, secret
-            FROM asterisk_config
-            WHERE name = %s
-        """, (name,))
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
-
-        if row and row[0]:  # اگر host موجود باشد
-            return {
-                'host': row[0],
-                'port': row[1] or 5038,
-                'username': row[2],
-                'secret': row[3]
-            }
-        return None
-    except Exception as e:
-        print(f"خطا در خواندن تنظیمات Asterisk از دیتابیس: {e}")
-        if conn:
-            conn.close()
-        return None
-
-
-@app.route('/api/asterisk/trunk', methods=['POST'])
-def create_trunk():
-    """ایجاد trunk جدید و ذخیره در دیتابیس"""
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({
-                'status': 'error',
-                'message': 'اطلاعات ارسالی نامعتبر است'
-            }), 400
-
-        trunk_name = data.get('name')
-        if not trunk_name:
-            return jsonify({
-                'status': 'error',
-                'message': 'نام trunk الزامی است'
-            }), 400
-
-        # خواندن پیکربندی از request یا environment
-        if 'config' in data:
-            config = TrunkConfig.from_dict(data['config'])
-        else:
-            # ساخت پیکربندی از فیلدهای جداگانه
-            config = {
-                'type': data.get('type', 'friend'),
-                'send_rpid': data.get('send_rpid', 'yes'),
-                'send_early_media': data.get('send_early_media', 'yes'),
-                'qualify': data.get('qualify', 'yes'),
-                'port': data.get('port', '5060'),
-                'nat': data.get('nat', 'force_rport,comedia'),
-                'insecure': data.get('insecure', 'port,invite'),
-                'host': data.get('host', ''),
-                'fromuser': data.get('fromuser', ''),
-                'username': data.get('username', ''),
-                'secret': data.get('secret', ''),
-                'disallow': data.get('disallow', 'all'),
-                'context': data.get('context', 'from-trunk'),
-                'allow': data.get('allow', 'ulaw,alaw'),
-            }
-
-        # اعتبارسنجی
-        is_valid, error_msg = TrunkConfig.validate(config)
-        if not is_valid:
-            return jsonify({
-                'status': 'error',
-                'message': error_msg
-            }), 400
-
-        # ساخت فایل پیکربندی Asterisk
-        asterisk_config = TrunkConfig.to_asterisk_config(trunk_name, config)
-
-        # ذخیره در دیتابیس
-        init_trunks_table()
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({
-                'status': 'error',
-                'message': 'خطا در اتصال به دیتابیس'
-            }), 500
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO trunks (name, config, asterisk_config)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (name)
-                DO UPDATE SET
-                    config = EXCLUDED.config,
-                    asterisk_config = EXCLUDED.asterisk_config,
-                    updated_at = CURRENT_TIMESTAMP
-                RETURNING id, created_at, updated_at
-            """, (trunk_name, Json(config), asterisk_config))
-
-            result = cursor.fetchone()
-            conn.commit()
-            cursor.close()
-            conn.close()
-
-            return jsonify({
-                'status': 'success',
-                'message': f'Trunk {trunk_name} با موفقیت ذخیره شد',
-                'trunk': {
-                    'name': trunk_name,
-                    'id': result[0],
-                    'created_at': result[1].isoformat(),
-                    'updated_at': result[2].isoformat()
-                },
-                'asterisk_config': asterisk_config
-            }), 200
-        except Exception as e:
-            if conn:
-                conn.rollback()
-                conn.close()
-            return jsonify({
-                'status': 'error',
-                'message': f'خطا در ذخیره trunk: {str(e)}'
-            }), 500
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'خطا: {str(e)}'
-        }), 500
-
-
-@app.route('/api/asterisk/trunk/config', methods=['GET'])
-def get_trunk_config():
-    """
-    دریافت پیکربندی trunk
-    ابتدا از دیتابیس می‌خواند، اگر پیدا نکرد از environment variables
-    """
-    try:
-        trunk_name = request.args.get('name', 'default')
-        source = None
-        config = None
-        asterisk_config = None
-
-        # اول از دیتابیس بخوان
-        init_trunks_table()
-        conn = get_db_connection()
-        if conn:
-            try:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT config, asterisk_config
-                    FROM trunks
-                    WHERE name = %s
-                """, (trunk_name,))
-                row = cursor.fetchone()
-                cursor.close()
-                conn.close()
-
-                if row:
-                    config = row[0]
-                    asterisk_config = row[1]
-                    source = 'database'
-            except Exception as e:
-                print(f"خطا در خواندن از دیتابیس: {e}")
-                if conn:
-                    conn.close()
-
-        # اگر در دیتابیس پیدا نشد، از environment variables بخوان
-        if not config:
-            env_config = TrunkConfig.from_environment(trunk_name)
-            if env_config.get('host'):
-                config = env_config
-                asterisk_config = TrunkConfig.to_asterisk_config(
-                    trunk_name,
-                    config
-                )
-                source = 'environment'
-
-        # اگر هیچ‌کدام پیدا نشد، خطا برگردان
-        if not config or not config.get('host'):
-            return jsonify({
-                'status': 'error',
-                'message': (
-                    f'پیکربندی trunk "{trunk_name}" '
-                    f'در دیتابیس یا environment variables یافت نشد'
-                )
-            }), 404
-
-        return jsonify({
-            'status': 'success',
-            'trunk_name': trunk_name,
-            'source': source,
-            'config': config,
-            'asterisk_config': asterisk_config
-        }), 200
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'خطا: {str(e)}'
-        }), 500
-
-
-@app.route('/api/asterisk/trunks/db', methods=['GET'])
-def list_trunks_from_db():
-    """دریافت لیست trunk‌ها از دیتابیس"""
-    try:
-        init_trunks_table()
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({
-                'status': 'error',
-                'message': 'خطا در اتصال به دیتابیس'
-            }), 500
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, name, config, asterisk_config,
-                       created_at, updated_at
-                FROM trunks
-                ORDER BY created_at DESC
-            """)
-            rows = cursor.fetchall()
-            cursor.close()
-            conn.close()
-
-            trunks = []
-            for row in rows:
-                trunks.append({
-                    'id': row[0],
-                    'name': row[1],
-                    'config': row[2],
-                    'asterisk_config': row[3],
-                    'created_at': row[4].isoformat() if row[4] else None,
-                    'updated_at': row[5].isoformat() if row[5] else None
-                })
-
-            return jsonify({
-                'status': 'success',
-                'trunks': trunks,
-                'count': len(trunks)
-            }), 200
-        except Exception as e:
-            if conn:
-                conn.close()
-            return jsonify({
-                'status': 'error',
-                'message': f'خطا: {str(e)}'
-            }), 500
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'خطا: {str(e)}'
-        }), 500
-
-
-@app.route('/api/asterisk/trunk/db/<trunk_name>', methods=['GET'])
-def get_trunk_from_db(trunk_name):
-    """دریافت پیکربندی trunk از دیتابیس"""
-    try:
-        init_trunks_table()
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({
-                'status': 'error',
-                'message': 'خطا در اتصال به دیتابیس'
-            }), 500
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, name, config, asterisk_config,
-                       created_at, updated_at
-                FROM trunks
-                WHERE name = %s
-            """, (trunk_name,))
-            row = cursor.fetchone()
-            cursor.close()
-            conn.close()
-
-            if not row:
-                return jsonify({
-                    'status': 'error',
-                    'message': f'Trunk {trunk_name} یافت نشد'
-                }), 404
-
-            return jsonify({
-                'status': 'success',
-                'trunk': {
-                    'id': row[0],
-                    'name': row[1],
-                    'config': row[2],
-                    'asterisk_config': row[3],
-                    'created_at': row[4].isoformat() if row[4] else None,
-                    'updated_at': row[5].isoformat() if row[5] else None
-                }
-            }), 200
-        except Exception as e:
-            if conn:
-                conn.close()
-            return jsonify({
-                'status': 'error',
-                'message': f'خطا: {str(e)}'
-            }), 500
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'خطا: {str(e)}'
-        }), 500
-
-
-@app.route('/api/call/simple', methods=['POST'])
-def make_simple_call():
-    """تماس ساده با یک شماره"""
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({
-                'status': 'error',
-                'message': 'اطلاعات ارسالی نامعتبر است'
-            }), 400
-
-        number = data.get('number')  # شماره مقصد
-        caller_id = data.get('caller_id')  # شماره نمایش داده شده (اختیاری)
-        trunk_name = data.get('trunk', 'trunk_external')  # نام trunk
-
-        if not number:
-            return jsonify({
-                'status': 'error',
-                'message': 'شماره تماس الزامی است'
-            }), 400
-
-        # اتصال به Asterisk
-        manager = AsteriskManager()
-        if not all([
-            manager.host,
-            manager.port,
-            manager.username,
-            manager.secret
-        ]):
-            return jsonify({
-                'status': 'error',
-                'message': 'تنظیمات Asterisk کامل نیست'
-            }), 400
-
-        success, error = manager.connect()
-        if not success:
-            return jsonify({
-                'status': 'error',
-                'message': f'خطا در اتصال به Asterisk: {error}'
-            }), 500
-
-        try:
-            # خواندن trunk name واقعی از دیتابیس
-            # اگر trunk name مشخص نشده یا trunk_external است، از trunk واقعی استفاده می‌کنیم
-            actual_trunk_name = trunk_name
-            
-            # خواندن trunk config از دیتابیس
-            init_trunks_table()
-            conn = get_db_connection()
-            if conn:
-                try:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        SELECT name, config
-                        FROM trunks
-                        WHERE name = %s
-                        LIMIT 1
-                    """, (trunk_name,))
-                    row = cursor.fetchone()
-                    cursor.close()
-                    conn.close()
-                    
-                    if row:
-                        # اگر trunk در دیتابیس پیدا شد، از نام آن استفاده می‌کنیم
-                        actual_trunk_name = row[0]
-                        print(f"Found trunk in database: {actual_trunk_name}")
-                except Exception as e:
-                    print(f"خطا در خواندن trunk از دیتابیس: {e}")
-                    if conn:
-                        conn.close()
-            
-            # اگر trunk_external است و در دیتابیس پیدا نشد، از trunk واقعی استفاده می‌کنیم
-            # از لیست Issabel مشخص است که trunk name واقعی 0utgoing-2191012787 است
-            if actual_trunk_name == 'trunk_external' or not actual_trunk_name:
-                # از لیست Issabel، trunk name واقعی 0utgoing-2191012787 است
-                actual_trunk_name = '0utgoing-2191012787'
-                print(f"Using default trunk: {actual_trunk_name}")
-            
-            # ساخت کانال برای تماس
-            # برای تماس مستقیم از trunk، از SIP/trunk/number استفاده می‌کنیم
-            # توجه: در Issabel، trunk name باید دقیقاً همان باشد که در sip show peers نشان داده می‌شود
-            channel = f"SIP/{actual_trunk_name}/{number}"
-            if not caller_id:
-                caller_id = number
-
-            # برقراری تماس
-            print(f"Calling {number} via {channel}")
-            print(f"Using trunk: {actual_trunk_name}")
-            success_call, message, action_id = manager.originate_call(
-                channel=channel,
-                number=number,
-                caller_id=caller_id,
-                context="from-trunk",
-                timeout=30
-            )
-
-            if not success_call:
-                return jsonify({
-                    'status': 'error',
-                    'message': f'خطا در تماس با {number}: {message}'
-                }), 500
-
-            return jsonify({
-                'status': 'success',
-                'message': f'تماس با {number} با موفقیت آغاز شد',
-                'number': number,
-                'action_id': action_id
-            }), 200
-
-        finally:
-            # در واقعیت باید پس از پایان تماس قطع شود
-            pass
-
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'خطا: {str(e)}'
-        }), 500
-
-
-@app.route('/api/call/make', methods=['POST'])
-def make_call():
-    """
-    برقراری تماس مسدود بین دو شماره
-    ساده‌سازی شده - فقط یک Originate با context و variables (مطابق کد PHP)
+    ایجاد سفارش تماس (مشابه ایجاد تراکنش در درگاه پرداخت)
+    
+    Body:
+        {
+            "from": "09140916320",
+            "to": "09221609805",
+            "user_token": "token123",
+            "trunk": "0utgoing-2191017280" (optional)
+        }
     """
     try:
         data = request.get_json()
@@ -1298,12 +617,10 @@ def make_call():
                 'message': 'اطلاعات ارسالی نامعتبر است'
             }), 400
 
-        # پارامترها (مطابق کد PHP: from, to, user_token)
-        number_a = data.get('from') or data.get('number_a')  # شماره تماس گیرنده
-        number_b = data.get('to') or data.get('number_b')  # شماره مقصد
-        user_token = data.get('user_token') or data.get('session_id')  # توکن کاربر
-        
-        # trunk name (اختیاری - پیش‌فرض از کد PHP)
+        # پارامترها
+        number_a = data.get('from') or data.get('number_a')
+        number_b = data.get('to') or data.get('number_b')
+        user_token = data.get('user_token')
         trunk_name = data.get('trunk', '0utgoing-2191017280')
 
         if not number_a or not number_b:
@@ -1312,8 +629,8 @@ def make_call():
                 'message': 'پارامترهای from و to الزامی است'
             }), 400
 
-        # ایجاد State Machine با metadata اولیه
-        state_machine = CallSessionStateMachine(
+        # ایجاد Order State Machine
+        order_state_machine = OrderStateMachine(
             metadata={
                 'number_a': number_a,
                 'number_b': number_b,
@@ -1321,75 +638,170 @@ def make_call():
                 'trunk_name': trunk_name
             }
         )
-        session_id = state_machine.get_session_id()
+        order_id = order_state_machine.get_order_id()
         
-        # اگر user_token داده نشده، از session_id استفاده می‌کنیم
-        if not user_token:
-            user_token = session_id
+        # انتقال به PENDING
+        order_state_machine.transition_to(OrderState.PENDING)
         
-        # ذخیره اولیه در دیتابیس
-        save_call_session(
-            state_machine,
+        # ذخیره در دیتابیس
+        save_order(
+            order_state_machine,
+            user_token=user_token,
             number_a=number_a,
             number_b=number_b,
             caller_id=number_a,
             trunk_name=trunk_name
         )
-        log_state_change(
-            session_id=session_id,
-            state=CallState.PENDING.value,
+        
+        # ایجاد event
+        create_event(
+            event_type='order.created',
+            entity_type='order',
+            entity_id=order_id,
+            order_id=order_id,
+            state=OrderState.PENDING.value,
             metadata={'number_a': number_a, 'number_b': number_b}
         )
+
+        return jsonify({
+            'status': 'success',
+            'message': 'سفارش با موفقیت ایجاد شد',
+            'order_id': order_id,
+            'state': order_state_machine.current_state.value,
+            'from': number_a,
+            'to': number_b,
+            'user_token': user_token
+        }), 201
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
+
+
+@app.route('/api/order/<order_id>/execute', methods=['POST'])
+def execute_order(order_id: str):
+    """
+    اجرای سفارش تماس (مشابه پرداخت در درگاه)
+    این endpoint سفارش را به حالت PROCESSING می‌برد و تماس را برقرار می‌کند
+    """
+    try:
+        # بارگذاری order
+        order_state_machine = load_order(order_id)
+        if not order_state_machine:
+            return jsonify({
+                'status': 'error',
+                'message': 'سفارش یافت نشد'
+            }), 404
+
+        if order_state_machine.is_final_state():
+            return jsonify({
+                'status': 'error',
+                'message': 'این سفارش در حالت نهایی است و نمی‌تواند اجرا شود'
+            }), 400
+
+        # انتقال به PROCESSING
+        order_state_machine.transition_to(OrderState.PROCESSING)
+        save_order(order_state_machine)
+        create_event(
+            event_type='order.processing',
+            entity_type='order',
+            entity_id=order_id,
+            order_id=order_id,
+            state=OrderState.PROCESSING.value,
+            previous_state=OrderState.PENDING.value
+        )
+
+        # دریافت اطلاعات از metadata
+        metadata = order_state_machine.get_metadata()
+        number_a = metadata.get('number_a')
+        number_b = metadata.get('number_b')
+        user_token = metadata.get('user_token')
+        trunk_name = metadata.get('trunk_name', '0utgoing-2191017280')
 
         # اتصال به Asterisk
         manager = AsteriskManager()
         if not all([manager.host, manager.port, manager.username, manager.secret]):
-            state_machine.transition_to(CallState.FAILED_SYSTEM)
-            save_call_session(state_machine, number_a=number_a, number_b=number_b,
-                            caller_id=number_a, trunk_name=trunk_name)
+            order_state_machine.transition_to(OrderState.FAILED, error='تنظیمات Asterisk کامل نیست')
+            save_order(order_state_machine)
             return jsonify({
                 'status': 'error',
                 'message': 'تنظیمات Asterisk کامل نیست',
-                'session_id': session_id,
-                'state': state_machine.get_current_state().value
+                'order_id': order_id,
+                'state': order_state_machine.current_state.value
             }), 400
 
         success, error = manager.connect()
         if not success:
-            state_machine.transition_to(CallState.FAILED_SYSTEM)
-            save_call_session(state_machine, number_a=number_a, number_b=number_b,
-                            caller_id=number_a, trunk_name=trunk_name)
+            order_state_machine.transition_to(OrderState.FAILED, error=f'خطا در اتصال به Asterisk: {error}')
+            save_order(order_state_machine)
             return jsonify({
                 'status': 'error',
                 'message': f'خطا در اتصال به Asterisk: {error}',
-                'session_id': session_id,
-                'state': state_machine.get_current_state().value
+                'order_id': order_id,
+                'state': order_state_machine.current_state.value
             }), 500
 
         try:
-            # ساخت کانال (مطابق کد PHP)
+            # ایجاد Call State Machine
+            call_state_machine = CallSessionStateMachine(
+                metadata={
+                    'order_id': order_id,
+                    'number_a': number_a,
+                    'number_b': number_b,
+                    'user_token': user_token,
+                    'trunk_name': trunk_name
+                }
+            )
+            call_id = call_state_machine.get_session_id()
+            
+            # انتقال order به INITIATED و ارتباط با call
+            order_state_machine.set_call_id(call_id)
+            order_state_machine.transition_to(OrderState.INITIATED)
+            save_order(order_state_machine)
+            create_event(
+                event_type='order.initiated',
+                entity_type='order',
+                entity_id=order_id,
+                order_id=order_id,
+                call_id=call_id,
+                state=OrderState.INITIATED.value,
+                previous_state=OrderState.PROCESSING.value
+            )
+
+            # ساخت کانال و برقراری تماس
             channel = f"SIP/{trunk_name}/{number_a}"
             
-            # انتقال به حالت CALLING_A
-            state_machine.transition_to(
+            # انتقال call به CALLING_A
+            call_state_machine.transition_to(
                 CallState.CALLING_A,
                 metadata={'channel': channel, 'trunk_name': trunk_name}
             )
-            save_call_session(state_machine, number_a=number_a, number_b=number_b,
-                            caller_id=number_a, trunk_name=trunk_name)
-            log_state_change(session_id, CallState.CALLING_A.value,
-                           previous_state=CallState.PENDING.value,
-                           metadata={'channel': channel})
+            save_call(call_state_machine, order_id=order_id,
+                     number_a=number_a, number_b=number_b,
+                     caller_id=number_a, trunk_name=trunk_name)
+            
+            create_event(
+                event_type='call.calling_a',
+                entity_type='call',
+                entity_id=call_id,
+                order_id=order_id,
+                call_id=call_id,
+                state=CallState.CALLING_A.value,
+                previous_state=CallState.PENDING.value,
+                metadata={'channel': channel}
+            )
 
-            # استفاده از context و variables (دقیقاً مطابق کد PHP)
+            # استفاده از context و variables (مطابق کد PHP)
             context_name = "securebridge-control"
             variables = {
-                'ARG1': number_a,      # from
-                'ARG2': number_b,      # to
-                'USER_TOKEN': user_token  # user_token
+                'ARG1': str(number_a),
+                'ARG2': str(number_b),
+                'USER_TOKEN': str(user_token or order_id)
             }
             
-            # برقراری تماس (دقیقاً مطابق کد PHP)
+            # برقراری تماس
             print(f"Calling {number_a} via {channel} with context {context_name}")
             print(f"Variables: {variables}")
             success_call, message, channel_id = manager.originate_call_with_context(
@@ -1403,59 +815,227 @@ def make_call():
             )
 
             if not success_call:
-                state_machine.transition_to(
+                call_state_machine.transition_to(
                     CallState.FAILED_A,
                     error=f"خطا در برقراری تماس: {message}",
                     metadata={'channel': channel, 'error_message': message}
                 )
-                save_call_session(state_machine, number_a=number_a, number_b=number_b,
-                                caller_id=number_a, trunk_name=trunk_name)
-                log_state_change(session_id, CallState.FAILED_A.value,
-                               previous_state=CallState.CALLING_A.value,
-                               error_message=f"خطا در برقراری تماس: {message}",
-                               metadata={'channel': channel})
+                save_call(call_state_machine, order_id=order_id,
+                         number_a=number_a, number_b=number_b,
+                         caller_id=number_a, trunk_name=trunk_name)
+                
+                order_state_machine.transition_to(OrderState.FAILED, error=f"خطا در برقراری تماس: {message}")
+                save_order(order_state_machine)
+                
+                create_event(
+                    event_type='call.failed',
+                    entity_type='call',
+                    entity_id=call_id,
+                    order_id=order_id,
+                    call_id=call_id,
+                    state=CallState.FAILED_A.value,
+                    error_message=f"خطا در برقراری تماس: {message}"
+                )
+                
                 return jsonify({
                     'status': 'error',
                     'message': f'خطا در برقراری تماس: {message}',
-                    'session_id': session_id,
-                    'state': state_machine.get_current_state().value,
-                    'response': message
+                    'order_id': order_id,
+                    'call_id': call_id,
+                    'state': order_state_machine.current_state.value
                 }), 500
 
             # استخراج Channel ID (اگر وجود دارد)
             if channel_id and channel_id != channel:
-                state_machine.update_metadata(channel_id=channel_id)
+                call_state_machine.update_metadata(channel_id=channel_id)
             
-            # انتقال به حالت BRIDGED (چون dialplan خودش bridge می‌کند)
-            state_machine.transition_to(
+            # انتقال call به BRIDGED (چون dialplan خودش bridge می‌کند)
+            call_state_machine.transition_to(
                 CallState.BRIDGED,
                 metadata={'channel_id': channel_id or channel, 'dialplan_handled': True}
             )
-            save_call_session(state_machine, number_a=number_a, number_b=number_b,
-                            caller_id=number_a, trunk_name=trunk_name,
-                            channel_a_id=channel_id or channel)
-            log_state_change(session_id, CallState.BRIDGED.value,
-                           previous_state=CallState.CALLING_A.value,
-                           metadata={'channel_id': channel_id or channel, 'method': 'dialplan'})
+            save_call(call_state_machine, order_id=order_id,
+                     number_a=number_a, number_b=number_b,
+                     caller_id=number_a, trunk_name=trunk_name,
+                     channel_a_id=channel_id or channel)
+            
+            create_event(
+                event_type='call.bridged',
+                entity_type='call',
+                entity_id=call_id,
+                order_id=order_id,
+                call_id=call_id,
+                state=CallState.BRIDGED.value,
+                previous_state=CallState.CALLING_A.value,
+                metadata={'channel_id': channel_id or channel, 'method': 'dialplan'}
+            )
 
-            # پاسخ (مطابق کد PHP)
+            # انتقال order به VERIFIED
+            order_state_machine.transition_to(OrderState.VERIFIED)
+            save_order(order_state_machine)
+            create_event(
+                event_type='order.verified',
+                entity_type='order',
+                entity_id=order_id,
+                order_id=order_id,
+                call_id=call_id,
+                state=OrderState.VERIFIED.value,
+                previous_state=OrderState.INITIATED.value
+            )
+
             return jsonify({
                 'status': 'success',
-                'message': 'Call initiated successfully',
-                'session_id': session_id,
-                'state': state_machine.get_current_state().value,
+                'message': 'تماس با موفقیت برقرار شد',
+                'order_id': order_id,
+                'call_id': call_id,
+                'state': order_state_machine.current_state.value,
+                'call_state': call_state_machine.current_state.value,
                 'from': number_a,
                 'to': number_b,
-                'user_token': user_token,
-                'response': message,
-                'state_history': [
-                    state.value for state in state_machine.get_state_history()
-                ]
+                'user_token': user_token or order_id
             }), 200
 
         finally:
-            # قطع اتصال
             manager.disconnect()
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
+
+
+@app.route('/api/order/<order_id>/status', methods=['GET'])
+def get_order_status(order_id: str):
+    """
+    بررسی وضعیت سفارش (مشابه بررسی وضعیت تراکنش در درگاه پرداخت)
+    """
+    try:
+        order_state_machine = load_order(order_id)
+        if not order_state_machine:
+            return jsonify({
+                'status': 'error',
+                'message': 'سفارش یافت نشد'
+            }), 404
+
+        # بارگذاری call مرتبط (اگر وجود دارد)
+        call_info = None
+        if order_state_machine.call_id:
+            call_state_machine = load_call(order_state_machine.call_id)
+            if call_state_machine:
+                call_info = {
+                    'call_id': call_state_machine.session_id,
+                    'state': call_state_machine.current_state.value,
+                    'is_final': call_state_machine.is_final_state(),
+                    'state_history': [s.value for s in call_state_machine.state_history],
+                    'last_updated': call_state_machine.state_timestamps[-1]['timestamp'] if call_state_machine.state_timestamps else None
+                }
+
+        return jsonify({
+            'status': 'success',
+            'order': {
+                'order_id': order_state_machine.order_id,
+                'state': order_state_machine.current_state.value,
+                'is_final': order_state_machine.is_final_state(),
+                'state_history': [s.value for s in order_state_machine.state_history],
+                'state_timestamps': order_state_machine.state_timestamps,
+                'error_log': order_state_machine.error_log,
+                'metadata': order_state_machine.metadata,
+                'call_id': order_state_machine.call_id,
+                'call': call_info
+            }
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
+
+
+@app.route('/api/call/<call_id>/status', methods=['GET'])
+def get_call_status(call_id: str):
+    """
+    بررسی وضعیت تماس (مشابه بررسی جزئیات پرداخت)
+    """
+    try:
+        call_state_machine = load_call(call_id)
+        if not call_state_machine:
+            return jsonify({
+                'status': 'error',
+                'message': 'تماس یافت نشد'
+            }), 404
+
+        return jsonify({
+            'status': 'success',
+            'call': {
+                'call_id': call_state_machine.session_id,
+                'state': call_state_machine.current_state.value,
+                'is_final': call_state_machine.is_final_state(),
+                'state_history': [s.value for s in call_state_machine.state_history],
+                'state_timestamps': call_state_machine.state_timestamps,
+                'error_log': call_state_machine.error_log,
+                'metadata': call_state_machine.metadata
+            }
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'خطا: {str(e)}'
+        }), 500
+
+
+@app.route('/api/order/<order_id>/events', methods=['GET'])
+def get_order_events(order_id: str):
+    """
+    دریافت events مرتبط با سفارش (مشابه webhook events در درگاه پرداخت)
+    """
+    try:
+        init_events_table()
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'status': 'error',
+                'message': 'خطا در اتصال به دیتابیس'
+            }), 500
+
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT event_id, event_type, entity_type, entity_id,
+                   call_id, state, previous_state, metadata, error_message,
+                   processed, created_at
+            FROM events
+            WHERE order_id = %s
+            ORDER BY created_at ASC
+        """, (order_id,))
+        
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        events = []
+        for row in rows:
+            events.append({
+                'event_id': row[0],
+                'event_type': row[1],
+                'entity_type': row[2],
+                'entity_id': row[3],
+                'call_id': row[4],
+                'state': row[5],
+                'previous_state': row[6],
+                'metadata': row[7],
+                'error_message': row[8],
+                'processed': row[9],
+                'created_at': row[10].isoformat() if row[10] else None
+            })
+
+        return jsonify({
+            'status': 'success',
+            'order_id': order_id,
+            'events': events,
+            'total': len(events)
+        }), 200
 
     except Exception as e:
         return jsonify({
