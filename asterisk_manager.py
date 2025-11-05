@@ -647,6 +647,36 @@ class AsteriskManager:
         else:
             return False, f"پاسخ نامعتبر: {response}", None
 
+    def get_channel_info(self, channel_id: str) -> Optional[Dict[str, str]]:
+        """
+        دریافت اطلاعات channel با استفاده از Status action
+        
+        Args:
+            channel_id: شناسه channel
+            
+        Returns:
+            دیکشنری اطلاعات channel یا None
+        """
+        if not self.connected:
+            return None
+        
+        params = {'Channel': channel_id}
+        response = self._send_command('Status', params)
+        
+        if 'Response: Error' in response or 'No such channel' in response:
+            return None
+        
+        # استخراج اطلاعات از response
+        info = {}
+        for line in response.split('\r\n'):
+            if ':' in line:
+                key, value = line.split(':', 1)
+                key = key.strip()
+                value = value.strip()
+                info[key] = value
+        
+        return info
+
     def bridge_channels(
         self,
         channel1: str,
@@ -667,6 +697,15 @@ class AsteriskManager:
             if not success:
                 return False, f"خطا در اتصال به Asterisk: {error}"
 
+        # بررسی وجود channels قبل از bridge
+        info1 = self.get_channel_info(channel1)
+        info2 = self.get_channel_info(channel2)
+        
+        if not info1:
+            return False, f"Channel {channel1} پیدا نشد یا در دسترس نیست"
+        if not info2:
+            return False, f"Channel {channel2} پیدا نشد یا در دسترس نیست"
+
         # استفاده از Manager Bridge action
         params = {
             'Channel1': channel1,
@@ -675,6 +714,9 @@ class AsteriskManager:
         }
 
         print(f"Bridge params: {params}")
+        print(f"Channel1 info: {info1.get('ChannelState', 'unknown')}")
+        print(f"Channel2 info: {info2.get('ChannelState', 'unknown')}")
+        
         response = self._send_command('Bridge', params)
         print(f"Bridge response: {response}")
 
@@ -683,6 +725,71 @@ class AsteriskManager:
             return True, "Bridge با موفقیت انجام شد"
         elif 'Response: Error' in response:
             error_msg = "خطا در bridge کردن"
+            for line in response.split('\r\n'):
+                if line.startswith('Message:'):
+                    error_msg = line.split(':', 1)[1].strip()
+                    break
+            return False, error_msg
+        else:
+            return False, f"پاسخ نامعتبر: {response}"
+
+    def execute_dial_on_channel(
+        self,
+        channel: str,
+        dial_string: str
+    ) -> tuple[bool, str]:
+        """
+        اجرای Dial application روی channel موجود با استفاده از Redirect
+        از لاگ Simotel: Dial(SIP/trunk/number,timeout,options) روی channel اجرا می‌شود
+        
+        راه‌حل: استفاده از Redirect به context که Dial را اجرا می‌کند
+        یا استفاده از Queue/Park برای bridge کردن
+
+        Args:
+            channel: کانال موجود (مثال: SIP/trunk-00000001)
+            dial_string: Dial string (مثال: SIP/trunk/number,timeout,options)
+
+        Returns:
+            tuple (success, message)
+        """
+        if not self.connected:
+            success, error = self.connect()
+            if not success:
+                return False, f"خطا در اتصال به Asterisk: {error}"
+
+        # استفاده از Redirect به context که Dial را اجرا می‌کند
+        # اما نیاز به dialplan داریم که Dial را اجرا کند
+        # راه‌حل بهتر: استفاده از Queue برای bridge کردن
+        # یا استفاده از روش دیگری
+        
+        # برای حالا، از Originate با Context استفاده می‌کنیم
+        # اما این یک channel جدید ایجاد می‌کند
+        
+        # بهترین راه: استفاده از Redirect به context که Dial را اجرا می‌کند
+        # context باید در dialplan تعریف شده باشد که Dial را اجرا کند
+        # مثال: [dial-number]
+        # exten => s,1,Dial(SIP/trunk/number,timeout,options)
+        
+        # استخراج شماره از dial_string
+        number = dial_string.split('/')[-1].split(',')[0]
+        
+        # استفاده از Redirect به context dial-number
+        params = {
+            'Channel': channel,
+            'Context': 'dial-number',  # باید در dialplan تعریف شود
+            'Exten': number,
+            'Priority': 1
+        }
+
+        print(f"Redirect to Dial params: {params}")
+        print(f"Dial string: {dial_string}")
+        response = self._send_command('Redirect', params)
+        print(f"Redirect response: {response}")
+
+        if 'Response: Success' in response:
+            return True, "Redirect با موفقیت انجام شد - Dial اجرا می‌شود"
+        elif 'Response: Error' in response:
+            error_msg = "خطا در redirect"
             for line in response.split('\r\n'):
                 if line.startswith('Message:'):
                     error_msg = line.split(':', 1)[1].strip()
@@ -700,11 +807,11 @@ class AsteriskManager:
     ) -> tuple[bool, str, Optional[str]]:
         """
         برقراری تماس و bridge کردن مستقیم با یک کانال دیگر
-        این متد از Application Dial استفاده می‌کند که مستقیماً به channel دیگر dial می‌کند
+        استفاده از Dial application که به شماره dial می‌کند و خودش bridge می‌کند
 
         Args:
-            channel: کانال تماس جدید (مثال: SIP/trunk/09140916320)
-            bridge_channel: کانال برای bridge کردن (مثال: SIP/trunk-00000001)
+            channel: کانال تماس جدید برای Dial (مثال: SIP/trunk/09140916320)
+            bridge_channel: شماره مقصد برای Dial (نه channel!)
             caller_id: شماره نمایش داده شده (اختیاری)
             timeout: زمان انتظار برای برقراری تماس (ثانیه)
 
@@ -716,12 +823,35 @@ class AsteriskManager:
             if not success:
                 return False, f"خطا در اتصال به Asterisk: {error}", None
 
-        # استفاده از Application Dial برای bridge مستقیم
+        # استخراج trunk name و number از bridge_channel یا channel
+        # اگر bridge_channel یک channel ID است (با -)، باید از آن استفاده کنیم
+        # اما Dial نمی‌تواند به channel dial کند، فقط به شماره
+        # پس باید شماره را از bridge_channel استخراج کنیم یا به عنوان parameter بدهیم
+        
+        # برای حالا، فرض می‌کنیم bridge_channel یک شماره است
+        # استخراج trunk name از channel
+        channel_parts = channel.split('/')
+        trunk_name = (
+            channel_parts[1]
+            if len(channel_parts) > 1 else 'trunk_external'
+        )
+        
+        # اگر bridge_channel یک channel ID است، شماره را از آن استخراج می‌کنیم
+        number = bridge_channel
+        if '/' in bridge_channel:
+            # اگر به صورت SIP/trunk/number است
+            parts = bridge_channel.split('/')
+            if len(parts) >= 3:
+                number = parts[2].split('-')[0]  # شماره را از channel ID استخراج می‌کنیم
+        
+        # استفاده از Application Dial برای تماس با شماره
+        # از لاگ Simotel: Dial(SIP/simotelpbx251/09221609805,60,TtKkFg)
+        dial_string = f"SIP/{trunk_name}/{number},{timeout},TtKkFg"
+        
         params = {
             'Channel': channel,
             'Application': 'Dial',
-            'Data': bridge_channel,  # Dial مستقیم به channel دیگر
-            'Timeout': str(timeout * 1000),  # میلی‌ثانیه
+            'Data': dial_string,  # Dial به شماره
             'Async': 'true'
         }
 

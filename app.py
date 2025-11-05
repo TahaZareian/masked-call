@@ -1138,10 +1138,13 @@ def make_call():
             state_machine.transition_to(CallState.CONNECTED_A)
 
             # تماس با شماره B و سپس bridge کردن
+            # از لاگ Simotel مشخص است که Dial به شماره دوم انجام می‌شود و خودش bridge می‌کند
+            # اما ما از AMI استفاده می‌کنیم و نمی‌توانیم Dial را روی channel موجود اجرا کنیم
+            # پس باید تماس دوم را برقرار کنیم و سپس bridge کنیم
             state_machine.transition_to(CallState.CALLING_B)
             channel_b = f"SIP/{actual_trunk_name}/{number_b}"
 
-            # روش بهتر: ابتدا تماس دوم را برقرار می‌کنیم، سپس bridge می‌کنیم
+            # برقراری تماس دوم
             print(f"Calling {number_b} via {channel_b}")
             success_b, message_b, channel_b_id = manager.originate_call_direct(
                 channel=channel_b,
@@ -1220,7 +1223,7 @@ def make_call():
                     'a': channel_a_id,
                     'b': channel_b_id
                 },
-                'bridge_method': 'bridge_action',
+                'bridge_method': 'bridge_action',  # استفاده از Bridge action
                 'state_history': [
                     state.value for state in state_machine.get_state_history()
                 ]
