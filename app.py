@@ -2,7 +2,7 @@ import os
 from flask import Flask, jsonify, request
 import psycopg2
 from psycopg2.extras import Json
-from datetime import datetime
+from typing import Optional, Dict
 from asterisk_manager import AsteriskManager
 from call_state_machine import CallSessionStateMachine, CallState
 from trunk_config import TrunkConfig
@@ -669,10 +669,13 @@ def save_call_session(state_machine: CallSessionStateMachine, **kwargs) -> bool:
         # محاسبه duration
         duration = None
         if state_data['created_at'] and state_data['updated_at']:
-            from datetime import datetime
-            created = datetime.fromisoformat(state_data['created_at'])
-            updated = datetime.fromisoformat(state_data['updated_at'])
-            duration = int((updated - created).total_seconds())
+            try:
+                from datetime import datetime as dt
+                created = dt.fromisoformat(state_data['created_at'])
+                updated = dt.fromisoformat(state_data['updated_at'])
+                duration = int((updated - created).total_seconds())
+            except Exception:
+                duration = None
         
         cursor.execute("""
             INSERT INTO call_sessions (
@@ -713,7 +716,7 @@ def save_call_session(state_machine: CallSessionStateMachine, **kwargs) -> bool:
             Json(state_machine.state_timestamps),
             Json(state_machine.error_log),
             state_machine.is_final_state(),
-            datetime.now().isoformat() if state_machine.is_final_state() else None,
+            None,  # completed_at توسط database خودش set می‌شود
             duration
         ))
         

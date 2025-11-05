@@ -35,8 +35,13 @@ class AsteriskManager:
             self.username = username
             self.secret = secret
         else:
-            # ابتدا از دیتابیس بخوان
-            db_config = self._load_from_db(config_name)
+            # ابتدا از دیتابیس بخوان (اگر در دسترس باشد)
+            try:
+                db_config = self._load_from_db(config_name)
+            except Exception as e:
+                print(f"خطا در خواندن از دیتابیس (بی‌ضرر): {e}")
+                db_config = None
+            
             if db_config:
                 self.host = db_config.get('host') or ''
                 port_value = db_config.get('port', 5038)
@@ -104,8 +109,12 @@ class AsteriskManager:
         Returns:
             دیکشنری تنظیمات یا None
         """
-        conn = self._get_db_connection()
-        if not conn:
+        try:
+            conn = self._get_db_connection()
+            if not conn:
+                return None
+        except Exception as e:
+            print(f"خطا در اتصال به دیتابیس (بی‌ضرر): {e}")
             return None
 
         try:
@@ -463,7 +472,6 @@ class AsteriskManager:
                 print(f"Found real Channel ID from Events: {channel_id}")
             else:
                 # اگر پیدا نشد، منتظر می‌مانیم
-                import time
                 time.sleep(1)  # منتظر می‌مانیم تا Channel ایجاد شود
                 # تلاش برای استخراج از response با الگوهای دیگر
                 # Pattern: SIP/trunk-xxxxx یا SIP/trunk/number-xxxxx
@@ -494,7 +502,6 @@ class AsteriskManager:
         """
         منتظر ماندن برای دریافت Channel ID از Events
         """
-        import time
         start_time = time.time()
         while time.time() - start_time < timeout:
             # بررسی Events برای Channel ID

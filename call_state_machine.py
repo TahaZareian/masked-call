@@ -2,7 +2,6 @@ from enum import Enum
 import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-import json
 
 
 class CallState(Enum):
