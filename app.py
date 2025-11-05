@@ -1129,15 +1129,15 @@ def make_call():
             # انتقال به حالت CONNECTED_A (پس از پاسخ)
             state_machine.transition_to(CallState.CONNECTED_A)
 
-            # تماس با شماره B و bridge مستقیم با تماس اول
+            # تماس با شماره B و سپس bridge کردن
             state_machine.transition_to(CallState.CALLING_B)
             channel_b = f"SIP/{actual_trunk_name}/{number_b}"
 
-            # استفاده از originate_bridge_call که مستقیماً به channel تماس اول dial می‌کند
-            print(f"Calling {number_b} via {channel_b} to bridge with {channel_a_id}")
-            success_b, message_b, action_id_b = manager.originate_bridge_call(
+            # روش بهتر: ابتدا تماس دوم را برقرار می‌کنیم، سپس bridge می‌کنیم
+            print(f"Calling {number_b} via {channel_b}")
+            success_b, message_b, channel_b_id = manager.originate_call_direct(
                 channel=channel_b,
-                bridge_channel=channel_a_id,  # Dial مستقیم به channel تماس اول
+                number=number_b,
                 caller_id=caller_id,
                 timeout=30
             )
@@ -1146,11 +1146,49 @@ def make_call():
                 state_machine.transition_to(CallState.FAILED_B)
                 return jsonify({
                     'status': 'error',
-                    'message': f'خطا در bridge کردن با {number_b}: {message_b}',
+                    'message': f'خطا در تماس با {number_b}: {message_b}',
                     'session_id': session_id,
                     'state': state_machine.get_current_state().value,
                     'number_a_connected': True,
                     'channel_a_id': channel_a_id
+                }), 500
+
+            # استخراج Channel ID واقعی برای تماس دوم
+            if not channel_b_id or channel_b_id == channel_b:
+                import re
+                channel_match = re.search(
+                    r'Channel:\s*(SIP/[^\r\n]+-\d+)',
+                    message_b
+                )
+                if channel_match:
+                    channel_b_id = channel_match.group(1)
+                    print(f"Found real Channel B ID from Events: {channel_b_id}")
+                else:
+                    channel_b_id = channel_b
+                    print(f"Using channel name as Channel B ID: {channel_b_id}")
+
+            # منتظر می‌مانیم تا تماس دوم پاسخ دهد
+            print(f"Waiting for {number_b} to answer...")
+            time.sleep(5)  # منتظر می‌مانیم تا کاربر پاسخ دهد
+
+            # استفاده از Bridge action برای bridge کردن دو channel
+            print(f"Bridging {channel_a_id} with {channel_b_id}")
+            success_bridge, bridge_message = manager.bridge_channels(
+                channel1=channel_a_id,
+                channel2=channel_b_id
+            )
+
+            if not success_bridge:
+                state_machine.transition_to(CallState.FAILED_B)
+                return jsonify({
+                    'status': 'error',
+                    'message': f'خطا در bridge کردن: {bridge_message}',
+                    'session_id': session_id,
+                    'state': state_machine.get_current_state().value,
+                    'number_a_connected': True,
+                    'number_b_connected': True,
+                    'channel_a_id': channel_a_id,
+                    'channel_b_id': channel_b_id
                 }), 500
 
             # انتقال به حالت BRIDGED
@@ -1165,9 +1203,9 @@ def make_call():
                 'number_b': number_b,
                 'channel_ids': {
                     'a': channel_a_id,
-                    'b': None
+                    'b': channel_b_id
                 },
-                'bridge_method': 'direct_dial',
+                'bridge_method': 'bridge_action',
                 'state_history': [
                     state.value for state in state_machine.get_state_history()
                 ]
