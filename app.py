@@ -1106,18 +1106,26 @@ def make_call():
             # اگر Channel ID نداریم یا Channel ID همان channel name است، از response استخراج می‌کنیم
             if not channel_a_id or channel_a_id == channel_a:
                 # استخراج Channel ID واقعی از response (از Events)
+                # Pattern: SIP/trunk-xxxxx (با unique ID hex مانند 0000039d)
                 import re
+                # الگوی اول: Channel: SIP/trunk-xxxxx
                 channel_match = re.search(
-                    r'Channel:\s*(SIP/[^\r\n]+-\d+)',
+                    r'Channel:\s*(SIP/[^\r\n]+-\w+)',
                     message_a
                 )
+                if not channel_match:
+                    # الگوی دوم: SIP/trunk-xxxxx در هر جای response
+                    channel_match = re.search(
+                        r'(SIP/[^\s\r\n/]+-\w+)',
+                        message_a
+                    )
                 if channel_match:
                     channel_a_id = channel_match.group(1)
-                    print(f"Found real Channel ID from Events: {channel_a_id}")
+                    print(f"Found real Channel A ID: {channel_a_id}")
                 else:
-                    # اگر پیدا نشد، از channel name استفاده می‌کنیم
+                    # اگر پیدا نشد، از channel name استفاده می‌کنیم (موقتاً)
                     channel_a_id = channel_a
-                    print(f"Using channel name as Channel ID: {channel_a_id}")
+                    print(f"Warning: Using channel name as Channel A ID: {channel_a_id}")
 
             # منتظر می‌مانیم تا تماس اول پاسخ دهد
             # در واقعیت، باید از Events استفاده کنیم تا بفهمیم تماس پاسخ داده است
@@ -1156,16 +1164,23 @@ def make_call():
             # استخراج Channel ID واقعی برای تماس دوم
             if not channel_b_id or channel_b_id == channel_b:
                 import re
+                # الگوی اول: Channel: SIP/trunk-xxxxx
                 channel_match = re.search(
-                    r'Channel:\s*(SIP/[^\r\n]+-\d+)',
+                    r'Channel:\s*(SIP/[^\r\n]+-\w+)',
                     message_b
                 )
+                if not channel_match:
+                    # الگوی دوم: SIP/trunk-xxxxx در هر جای response
+                    channel_match = re.search(
+                        r'(SIP/[^\s\r\n/]+-\w+)',
+                        message_b
+                    )
                 if channel_match:
                     channel_b_id = channel_match.group(1)
-                    print(f"Found real Channel B ID from Events: {channel_b_id}")
+                    print(f"Found real Channel B ID: {channel_b_id}")
                 else:
                     channel_b_id = channel_b
-                    print(f"Using channel name as Channel B ID: {channel_b_id}")
+                    print(f"Warning: Using channel name as Channel B ID: {channel_b_id}")
 
             # منتظر می‌مانیم تا تماس دوم پاسخ دهد
             print(f"Waiting for {number_b} to answer...")

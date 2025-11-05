@@ -453,8 +453,9 @@ class AsteriskManager:
             
             # جستجو برای Channel ID واقعی در response (از Events)
             # Channel ID واقعی شامل unique ID است (مثال: SIP/0utgoing-2191012787-000002dc)
+            # یا از لاگ: SIP/0utgoing-2191012787-0000039d
             channel_match = re.search(
-                r'Channel:\s*(SIP/[^\r\n]+-\d+)',
+                r'Channel:\s*(SIP/[^\r\n]+-\w+)',
                 response
             )
             if channel_match:
@@ -464,11 +465,19 @@ class AsteriskManager:
                 # اگر پیدا نشد، منتظر می‌مانیم
                 import time
                 time.sleep(1)  # منتظر می‌مانیم تا Channel ایجاد شود
-                # Channel ID معمولاً به صورت SIP/trunk-xxxxx است
-            
-            # اگر هنوز Channel ID نداریم، از channel name استفاده می‌کنیم
-            if not channel_id:
-                channel_id = channel
+                # تلاش برای استخراج از response با الگوهای دیگر
+                # Pattern: SIP/trunk-xxxxx یا SIP/trunk/number-xxxxx
+                channel_match = re.search(
+                    r'(SIP/[^\s\r\n/]+-\w+)',
+                    response
+                )
+                if channel_match:
+                    channel_id = channel_match.group(1)
+                    print(f"Found Channel ID with alternative pattern: {channel_id}")
+                else:
+                    # اگر هنوز پیدا نشد، از channel name استفاده می‌کنیم
+                    channel_id = channel
+                    print(f"Using channel name as Channel ID: {channel_id}")
             
             return True, response, channel_id  # response را برمی‌گردانیم تا بتوانیم Channel ID را استخراج کنیم
         elif 'Response: Error' in response:
