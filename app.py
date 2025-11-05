@@ -1381,8 +1381,10 @@ def make_call():
                         conn.close()
             
             # اگر trunk_external است و در دیتابیس پیدا نشد، از trunk واقعی استفاده می‌کنیم
+            # در کد PHP، trunk name: 0utgoing-2191017280 بود (نه 0utgoing-2191012787)
             if actual_trunk_name == 'trunk_external' or not actual_trunk_name:
-                actual_trunk_name = '0utgoing-2191012787'
+                # از کد PHP: trunk name واقعی
+                actual_trunk_name = '0utgoing-2191017280'
                 print(f"Using default trunk: {actual_trunk_name}")
 
             # شروع تماس: انتقال به حالت CALLING_A
@@ -1473,144 +1475,30 @@ def make_call():
             # به‌روزرسانی metadata با channel_a_id
             state_machine.update_metadata(channel_a_id=channel_a_id)
             
-            # منتظر می‌مانیم تا تماس اول پاسخ دهد
-            # در واقعیت، باید از Events استفاده کنیم تا بفهمیم تماس پاسخ داده است
-            # برای حالا، یک تاخیر کوتاه اضافه می‌کنیم تا کاربر پاسخ دهد
+            # در کد PHP قبلی، فقط یک Originate انجام می‌شد که به context می‌رفت
+            # و dialplan خودش تماس دوم را انجام می‌داد و bridge می‌کرد
+            # پس دیگر نیازی به originate_call_direct برای شماره B نیست
+            # dialplan خودش کار را انجام می‌دهد
+            
+            # انتقال به حالت BRIDGED (چون dialplan خودش bridge می‌کند)
+            # منتظر می‌مانیم تا dialplan کار را انجام دهد
             import time
-            print(f"Waiting for {number_a} to answer...")
-            time.sleep(5)  # منتظر می‌مانیم تا کاربر پاسخ دهد
+            print(f"Waiting for dialplan to complete the call and bridge...")
+            time.sleep(2)  # زمان کوتاه برای شروع فرآیند dialplan
             
-            # انتقال به حالت CONNECTED_A (پس از پاسخ)
-            state_machine.transition_to(
-                CallState.CONNECTED_A,
-                metadata={'channel_a_id': channel_a_id}
-            )
-            save_call_session(state_machine, number_a=number_a, number_b=number_b,
-                            caller_id=caller_id, trunk_name=actual_trunk_name,
-                            channel_a_id=channel_a_id)
-            log_state_change(session_id, CallState.CONNECTED_A.value,
-                           previous_state=CallState.CALLING_A.value,
-                           metadata={'channel_a_id': channel_a_id})
-
-            # تماس با شماره B و سپس bridge کردن
-            # از لاگ Simotel مشخص است که Dial به شماره دوم انجام می‌شود و خودش bridge می‌کند
-            # اما ما از AMI استفاده می‌کنیم و نمی‌توانیم Dial را روی channel موجود اجرا کنیم
-            # پس باید تماس دوم را برقرار کنیم و سپس bridge کنیم
-            state_machine.transition_to(
-                CallState.CALLING_B,
-                metadata={'channel_b': channel_b}
-            )
-            save_call_session(state_machine, number_a=number_a, number_b=number_b,
-                            caller_id=caller_id, trunk_name=actual_trunk_name,
-                            channel_a_id=channel_a_id)
-            log_state_change(session_id, CallState.CALLING_B.value,
-                           previous_state=CallState.CONNECTED_A.value,
-                           metadata={'channel_b': channel_b})
-            channel_b = f"SIP/{actual_trunk_name}/{number_b}"
-
-            # برقراری تماس دوم
-            print(f"Calling {number_b} via {channel_b}")
-            success_b, message_b, channel_b_id = manager.originate_call_direct(
-                channel=channel_b,
-                number=number_b,
-                caller_id=caller_id,
-                timeout=30
-            )
-
-            if not success_b:
-                state_machine.transition_to(
-                    CallState.FAILED_B,
-                    error=f"خطا در تماس با {number_b}: {message_b}",
-                    metadata={'channel_b': channel_b, 'channel_a_id': channel_a_id, 
-                            'error_message': message_b}
-                )
-                save_call_session(state_machine, number_a=number_a, number_b=number_b,
-                                caller_id=caller_id, trunk_name=actual_trunk_name,
-                                channel_a_id=channel_a_id)
-                log_state_change(session_id, CallState.FAILED_B.value,
-                               previous_state=CallState.CALLING_B.value,
-                               error_message=f"خطا در تماس با {number_b}: {message_b}",
-                               metadata={'channel_b': channel_b, 'channel_a_id': channel_a_id})
-                return jsonify({
-                    'status': 'error',
-                    'message': f'خطا در تماس با {number_b}: {message_b}',
-                    'session_id': session_id,
-                    'state': state_machine.get_current_state().value,
-                    'number_a_connected': True,
-                    'channel_a_id': channel_a_id
-                }), 500
-
-            # استخراج Channel ID واقعی برای تماس دوم
-            if not channel_b_id or channel_b_id == channel_b:
-                import re
-                # الگوی اول: Channel: SIP/trunk-xxxxx
-                channel_match = re.search(
-                    r'Channel:\s*(SIP/[^\r\n]+-\w+)',
-                    message_b
-                )
-                if not channel_match:
-                    # الگوی دوم: SIP/trunk-xxxxx در هر جای response
-                    channel_match = re.search(
-                        r'(SIP/[^\s\r\n/]+-\w+)',
-                        message_b
-                    )
-                if channel_match:
-                    channel_b_id = channel_match.group(1)
-                    print(f"Found real Channel B ID: {channel_b_id}")
-                else:
-                    channel_b_id = channel_b
-                    print(f"Warning: Using channel name as Channel B ID: {channel_b_id}")
-
-            # به‌روزرسانی metadata با channel_b_id
-            state_machine.update_metadata(channel_b_id=channel_b_id)
-            
-            # منتظر می‌مانیم تا تماس دوم پاسخ دهد
-            print(f"Waiting for {number_b} to answer...")
-            time.sleep(5)  # منتظر می‌مانیم تا کاربر پاسخ دهد
-
-            # استفاده از Bridge action برای bridge کردن دو channel
-            print(f"Bridging {channel_a_id} with {channel_b_id}")
-            success_bridge, bridge_message = manager.bridge_channels(
-                channel1=channel_a_id,
-                channel2=channel_b_id
-            )
-
-            if not success_bridge:
-                state_machine.transition_to(
-                    CallState.FAILED_B,
-                    error=f"خطا در bridge کردن: {bridge_message}",
-                    metadata={'channel_a_id': channel_a_id, 'channel_b_id': channel_b_id,
-                            'error_message': bridge_message}
-                )
-                save_call_session(state_machine, number_a=number_a, number_b=number_b,
-                                caller_id=caller_id, trunk_name=actual_trunk_name,
-                                channel_a_id=channel_a_id, channel_b_id=channel_b_id)
-                log_state_change(session_id, CallState.FAILED_B.value,
-                               previous_state=CallState.CALLING_B.value,
-                               error_message=f"خطا در bridge کردن: {bridge_message}",
-                               metadata={'channel_a_id': channel_a_id, 'channel_b_id': channel_b_id})
-                return jsonify({
-                    'status': 'error',
-                    'message': f'خطا در bridge کردن: {bridge_message}',
-                    'session_id': session_id,
-                    'state': state_machine.get_current_state().value,
-                    'number_a_connected': True,
-                    'number_b_connected': True,
-                    'channel_a_id': channel_a_id,
-                    'channel_b_id': channel_b_id
-                }), 500
-
             # انتقال به حالت BRIDGED
+            # در واقعیت، باید از Events استفاده کنیم تا بفهمیم تماس کامل شد
+            # اما برای حالا، فرض می‌کنیم که dialplan کار را انجام می‌دهد
             state_machine.transition_to(
                 CallState.BRIDGED,
-                metadata={'channel_a_id': channel_a_id, 'channel_b_id': channel_b_id}
+                metadata={'channel_a_id': channel_a_id, 'dialplan_handled': True}
             )
             save_call_session(state_machine, number_a=number_a, number_b=number_b,
                             caller_id=caller_id, trunk_name=actual_trunk_name,
-                            channel_a_id=channel_a_id, channel_b_id=channel_b_id)
+                            channel_a_id=channel_a_id)
             log_state_change(session_id, CallState.BRIDGED.value,
-                           previous_state=CallState.CALLING_B.value,
-                           metadata={'channel_a_id': channel_a_id, 'channel_b_id': channel_b_id})
+                           previous_state=CallState.CALLING_A.value,
+                           metadata={'channel_a_id': channel_a_id, 'method': 'dialplan'})
 
             return jsonify({
                 'status': 'success',
@@ -1621,9 +1509,9 @@ def make_call():
                 'number_b': number_b,
                 'channel_ids': {
                     'a': channel_a_id,
-                    'b': channel_b_id
+                    'b': None  # dialplan خودش channel B را مدیریت می‌کند
                 },
-                'bridge_method': 'bridge_action',  # استفاده از Bridge action
+                'bridge_method': 'dialplan',  # dialplan خودش bridge می‌کند (مطابق کد PHP)
                 'state_history': [
                     state.value for state in state_machine.get_state_history()
                 ]
