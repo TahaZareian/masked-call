@@ -1283,7 +1283,10 @@ def make_simple_call():
 
 @app.route('/api/call/make', methods=['POST'])
 def make_call():
-    """برقراری تماس مسدود بین دو شماره"""
+    """
+    برقراری تماس مسدود بین دو شماره
+    ساده‌سازی شده - فقط یک Originate با context و variables (مطابق کد PHP)
+    """
     try:
         data = request.get_json()
         if not data:
@@ -1292,15 +1295,18 @@ def make_call():
                 'message': 'اطلاعات ارسالی نامعتبر است'
             }), 400
 
-        number_a = data.get('number_a')  # شماره تماس گیرنده
-        number_b = data.get('number_b')  # شماره مقصد
-        caller_id = data.get('caller_id')  # شماره نمایش داده شده (اختیاری)
-        trunk_name = data.get('trunk', 'trunk_external')  # نام trunk
+        # پارامترها (مطابق کد PHP: from, to, user_token)
+        number_a = data.get('from') or data.get('number_a')  # شماره تماس گیرنده
+        number_b = data.get('to') or data.get('number_b')  # شماره مقصد
+        user_token = data.get('user_token') or data.get('session_id')  # توکن کاربر
+        
+        # trunk name (اختیاری - پیش‌فرض از کد PHP)
+        trunk_name = data.get('trunk', '0utgoing-2191017280')
 
         if not number_a or not number_b:
             return jsonify({
                 'status': 'error',
-                'message': 'شماره تماس گیرنده و مقصد الزامی است'
+                'message': 'پارامترهای from و to الزامی است'
             }), 400
 
         # ایجاد State Machine با metadata اولیه
@@ -1308,18 +1314,22 @@ def make_call():
             metadata={
                 'number_a': number_a,
                 'number_b': number_b,
-                'caller_id': caller_id,
+                'user_token': user_token,
                 'trunk_name': trunk_name
             }
         )
         session_id = state_machine.get_session_id()
+        
+        # اگر user_token داده نشده، از session_id استفاده می‌کنیم
+        if not user_token:
+            user_token = session_id
         
         # ذخیره اولیه در دیتابیس
         save_call_session(
             state_machine,
             number_a=number_a,
             number_b=number_b,
-            caller_id=caller_id,
+            caller_id=number_a,
             trunk_name=trunk_name
         )
         log_state_change(
@@ -1330,13 +1340,10 @@ def make_call():
 
         # اتصال به Asterisk
         manager = AsteriskManager()
-        if not all([
-            manager.host,
-            manager.port,
-            manager.username,
-            manager.secret
-        ]):
+        if not all([manager.host, manager.port, manager.username, manager.secret]):
             state_machine.transition_to(CallState.FAILED_SYSTEM)
+            save_call_session(state_machine, number_a=number_a, number_b=number_b,
+                            caller_id=number_a, trunk_name=trunk_name)
             return jsonify({
                 'status': 'error',
                 'message': 'تنظیمات Asterisk کامل نیست',
@@ -1347,6 +1354,8 @@ def make_call():
         success, error = manager.connect()
         if not success:
             state_machine.transition_to(CallState.FAILED_SYSTEM)
+            save_call_session(state_machine, number_a=number_a, number_b=number_b,
+                            caller_id=number_a, trunk_name=trunk_name)
             return jsonify({
                 'status': 'error',
                 'message': f'خطا در اتصال به Asterisk: {error}',
@@ -1355,171 +1364,95 @@ def make_call():
             }), 500
 
         try:
-            # خواندن trunk name واقعی از دیتابیس
-            actual_trunk_name = trunk_name
-            init_trunks_table()
-            conn = get_db_connection()
-            if conn:
-                try:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        SELECT name, config
-                        FROM trunks
-                        WHERE name = %s
-                        LIMIT 1
-                    """, (trunk_name,))
-                    row = cursor.fetchone()
-                    cursor.close()
-                    conn.close()
-                    
-                    if row:
-                        actual_trunk_name = row[0]
-                        print(f"Found trunk in database: {actual_trunk_name}")
-                except Exception as e:
-                    print(f"خطا در خواندن trunk از دیتابیس: {e}")
-                    if conn:
-                        conn.close()
+            # ساخت کانال (مطابق کد PHP)
+            channel = f"SIP/{trunk_name}/{number_a}"
             
-            # اگر trunk_external است و در دیتابیس پیدا نشد، از trunk واقعی استفاده می‌کنیم
-            # در کد PHP، trunk name: 0utgoing-2191017280 بود (نه 0utgoing-2191012787)
-            if actual_trunk_name == 'trunk_external' or not actual_trunk_name:
-                # از کد PHP: trunk name واقعی
-                actual_trunk_name = '0utgoing-2191017280'
-                print(f"Using default trunk: {actual_trunk_name}")
-
-            # شروع تماس: انتقال به حالت CALLING_A
+            # انتقال به حالت CALLING_A
             state_machine.transition_to(
                 CallState.CALLING_A,
-                metadata={'channel_a': channel_a, 'actual_trunk_name': actual_trunk_name}
+                metadata={'channel': channel, 'trunk_name': trunk_name}
             )
-            save_call_session(state_machine, number_a=number_a, number_b=number_b, 
-                            caller_id=caller_id, trunk_name=actual_trunk_name)
-            log_state_change(session_id, CallState.CALLING_A.value, 
+            save_call_session(state_machine, number_a=number_a, number_b=number_b,
+                            caller_id=number_a, trunk_name=trunk_name)
+            log_state_change(session_id, CallState.CALLING_A.value,
                            previous_state=CallState.PENDING.value,
-                           metadata={'channel_a': channel_a})
+                           metadata={'channel': channel})
 
-            # ساخت کانال برای شماره A (مطابق کد PHP قبلی)
-            channel_a = f"SIP/{actual_trunk_name}/{number_a}"
-            if not caller_id:
-                caller_id = number_a
-
-            # استفاده از context و variables (مطابق کد PHP قبلی که از securebridge-control استفاده می‌کرد)
-            # context باید در dialplan Asterisk تعریف شده باشد
-            context_name = "securebridge-control"  # یا context دیگری که در dialplan تعریف شده
-            
-            # ایجاد متغیرها (مطابق کد PHP)
+            # استفاده از context و variables (دقیقاً مطابق کد PHP)
+            context_name = "securebridge-control"
             variables = {
-                'ARG1': number_a,  # شماره تماس گیرنده
-                'ARG2': number_b,  # شماره مقصد
-                'USER_TOKEN': session_id  # شناسه session به عنوان token
+                'ARG1': number_a,      # from
+                'ARG2': number_b,      # to
+                'USER_TOKEN': user_token  # user_token
             }
             
-            # برقراری تماس با شماره A با استفاده از context و variables
-            # این روش مشابه کد PHP قبلی است که درست کار می‌کرده
-            print(f"Calling {number_a} via {channel_a} with context {context_name}")
+            # برقراری تماس (دقیقاً مطابق کد PHP)
+            print(f"Calling {number_a} via {channel} with context {context_name}")
             print(f"Variables: {variables}")
-            success_a, message_a, channel_a_id = manager.originate_call_with_context(
-                channel=channel_a,
+            success_call, message, channel_id = manager.originate_call_with_context(
+                channel=channel,
                 context=context_name,
                 extension='s',
                 priority=1,
-                caller_id=caller_id,
+                caller_id=number_a,
                 variables=variables,
                 timeout=30
             )
 
-            if not success_a:
+            if not success_call:
                 state_machine.transition_to(
                     CallState.FAILED_A,
-                    error=f"خطا در تماس با {number_a}: {message_a}",
-                    metadata={'channel_a': channel_a, 'error_message': message_a}
+                    error=f"خطا در برقراری تماس: {message}",
+                    metadata={'channel': channel, 'error_message': message}
                 )
                 save_call_session(state_machine, number_a=number_a, number_b=number_b,
-                                caller_id=caller_id, trunk_name=actual_trunk_name)
+                                caller_id=number_a, trunk_name=trunk_name)
                 log_state_change(session_id, CallState.FAILED_A.value,
                                previous_state=CallState.CALLING_A.value,
-                               error_message=f"خطا در تماس با {number_a}: {message_a}",
-                               metadata={'channel_a': channel_a})
+                               error_message=f"خطا در برقراری تماس: {message}",
+                               metadata={'channel': channel})
                 return jsonify({
                     'status': 'error',
-                    'message': f'خطا در تماس با {number_a}: {message_a}',
+                    'message': f'خطا در برقراری تماس: {message}',
                     'session_id': session_id,
-                    'state': state_machine.get_current_state().value
+                    'state': state_machine.get_current_state().value,
+                    'response': message
                 }), 500
 
-            # Channel ID واقعی از originate_call_direct برگردانده شده است
-            # اگر Channel ID نداریم یا Channel ID همان channel name است، از response استخراج می‌کنیم
-            if not channel_a_id or channel_a_id == channel_a:
-                # استخراج Channel ID واقعی از response (از Events)
-                # Pattern: SIP/trunk-xxxxx (با unique ID hex مانند 0000039d)
-                import re
-                # الگوی اول: Channel: SIP/trunk-xxxxx
-                channel_match = re.search(
-                    r'Channel:\s*(SIP/[^\r\n]+-\w+)',
-                    message_a
-                )
-                if not channel_match:
-                    # الگوی دوم: SIP/trunk-xxxxx در هر جای response
-                    channel_match = re.search(
-                        r'(SIP/[^\s\r\n/]+-\w+)',
-                        message_a
-                    )
-                if channel_match:
-                    channel_a_id = channel_match.group(1)
-                    print(f"Found real Channel A ID: {channel_a_id}")
-                else:
-                    # اگر پیدا نشد، از channel name استفاده می‌کنیم (موقتاً)
-                    channel_a_id = channel_a
-                    print(f"Warning: Using channel name as Channel A ID: {channel_a_id}")
-
-            # به‌روزرسانی metadata با channel_a_id
-            state_machine.update_metadata(channel_a_id=channel_a_id)
-            
-            # در کد PHP قبلی، فقط یک Originate انجام می‌شد که به context می‌رفت
-            # و dialplan خودش تماس دوم را انجام می‌داد و bridge می‌کرد
-            # پس دیگر نیازی به originate_call_direct برای شماره B نیست
-            # dialplan خودش کار را انجام می‌دهد
+            # استخراج Channel ID (اگر وجود دارد)
+            if channel_id and channel_id != channel:
+                state_machine.update_metadata(channel_id=channel_id)
             
             # انتقال به حالت BRIDGED (چون dialplan خودش bridge می‌کند)
-            # منتظر می‌مانیم تا dialplan کار را انجام دهد
-            import time
-            print(f"Waiting for dialplan to complete the call and bridge...")
-            time.sleep(2)  # زمان کوتاه برای شروع فرآیند dialplan
-            
-            # انتقال به حالت BRIDGED
-            # در واقعیت، باید از Events استفاده کنیم تا بفهمیم تماس کامل شد
-            # اما برای حالا، فرض می‌کنیم که dialplan کار را انجام می‌دهد
             state_machine.transition_to(
                 CallState.BRIDGED,
-                metadata={'channel_a_id': channel_a_id, 'dialplan_handled': True}
+                metadata={'channel_id': channel_id or channel, 'dialplan_handled': True}
             )
             save_call_session(state_machine, number_a=number_a, number_b=number_b,
-                            caller_id=caller_id, trunk_name=actual_trunk_name,
-                            channel_a_id=channel_a_id)
+                            caller_id=number_a, trunk_name=trunk_name,
+                            channel_a_id=channel_id or channel)
             log_state_change(session_id, CallState.BRIDGED.value,
                            previous_state=CallState.CALLING_A.value,
-                           metadata={'channel_a_id': channel_a_id, 'method': 'dialplan'})
+                           metadata={'channel_id': channel_id or channel, 'method': 'dialplan'})
 
+            # پاسخ (مطابق کد PHP)
             return jsonify({
                 'status': 'success',
-                'message': 'تماس با موفقیت برقرار شد',
+                'message': 'Call initiated successfully',
                 'session_id': session_id,
                 'state': state_machine.get_current_state().value,
-                'number_a': number_a,
-                'number_b': number_b,
-                'channel_ids': {
-                    'a': channel_a_id,
-                    'b': None  # dialplan خودش channel B را مدیریت می‌کند
-                },
-                'bridge_method': 'dialplan',  # dialplan خودش bridge می‌کند (مطابق کد PHP)
+                'from': number_a,
+                'to': number_b,
+                'user_token': user_token,
+                'response': message,
                 'state_history': [
                     state.value for state in state_machine.get_state_history()
                 ]
             }), 200
 
         finally:
-            # در واقعیت باید پس از پایان تماس قطع شود
-            pass
+            # قطع اتصال
+            manager.disconnect()
 
     except Exception as e:
         return jsonify({
