@@ -1396,22 +1396,33 @@ def make_call():
                            previous_state=CallState.PENDING.value,
                            metadata={'channel_a': channel_a})
 
-            # ساخت کانال برای شماره A
+            # ساخت کانال برای شماره A (مطابق کد PHP قبلی)
             channel_a = f"SIP/{actual_trunk_name}/{number_a}"
             if not caller_id:
                 caller_id = number_a
 
-            # برای bridge کردن دو تماس بدون وابستگی به dialplan:
-            # 1. تماس اول را برقرار می‌کنیم و منتظر می‌مانیم تا پاسخ دهد
-            # 2. پس از پاسخ، تماس دوم را برقرار می‌کنیم و مستقیماً به channel تماس اول dial می‌کنیم
-            # 3. این باعث می‌شود که دو تماس مستقیماً bridge شوند
+            # استفاده از context و variables (مطابق کد PHP قبلی که از securebridge-control استفاده می‌کرد)
+            # context باید در dialplan Asterisk تعریف شده باشد
+            context_name = "securebridge-control"  # یا context دیگری که در dialplan تعریف شده
             
-            # برقراری تماس با شماره A (مستقیم بدون dialplan)
-            print(f"Calling {number_a} via {channel_a}")
-            success_a, message_a, channel_a_id = manager.originate_call_direct(
+            # ایجاد متغیرها (مطابق کد PHP)
+            variables = {
+                'ARG1': number_a,  # شماره تماس گیرنده
+                'ARG2': number_b,  # شماره مقصد
+                'USER_TOKEN': session_id  # شناسه session به عنوان token
+            }
+            
+            # برقراری تماس با شماره A با استفاده از context و variables
+            # این روش مشابه کد PHP قبلی است که درست کار می‌کرده
+            print(f"Calling {number_a} via {channel_a} with context {context_name}")
+            print(f"Variables: {variables}")
+            success_a, message_a, channel_a_id = manager.originate_call_with_context(
                 channel=channel_a,
-                number=number_a,
+                context=context_name,
+                extension='s',
+                priority=1,
                 caller_id=caller_id,
+                variables=variables,
                 timeout=30
             )
 

@@ -582,28 +582,31 @@ class AsteriskManager:
         else:
             return False, f"پاسخ نامعتبر: {response}", None
 
-    def originate_call_with_channel(
+    def originate_call_with_context(
         self,
         channel: str,
         context: str,
-        extension: str,
+        extension: str = 's',
         priority: int = 1,
         caller_id: Optional[str] = None,
+        variables: Optional[Dict[str, str]] = None,
         timeout: int = 30
     ) -> tuple[bool, str, Optional[str]]:
         """
-        برقراری تماس با استفاده از Context/Exten (برای bridge کردن)
+        برقراری تماس با استفاده از Context/Exten و Variables
+        مشابه کد PHP قبلی که از context securebridge-control استفاده می‌کرد
 
         Args:
-            channel: کانال تماس (مثال: SIP/trunk/09140916320)
-            context: کانتکست Asterisk (مثال: from-trunk)
-            extension: extension در context
-            priority: اولویت در dialplan
+            channel: کانال تماس (مثال: SIP/0utgoing-2191017280/09140916320)
+            context: کانتکست Asterisk (مثال: securebridge-control)
+            extension: extension در context (پیش‌فرض: s)
+            priority: اولویت در dialplan (پیش‌فرض: 1)
             caller_id: شماره نمایش داده شده (اختیاری)
+            variables: دیکشنری متغیرها (مثال: {'ARG1': '09140916320', 'ARG2': '09221609805', 'USER_TOKEN': 'token123'})
             timeout: زمان انتظار برای برقراری تماس (ثانیه)
 
         Returns:
-            tuple (success, message, channel_uniqueid)
+            tuple (success, message, channel_id)
         """
         if not self.connected:
             success, error = self.connect()
@@ -624,19 +627,68 @@ class AsteriskManager:
         if caller_id:
             params['CallerID'] = caller_id
 
-        print(f"Originate with Context/Exten params: {params}")
-        response = self._send_command('Originate', params)
-        print(f"Originate response: {response}")
+        # اضافه کردن Variables (مثل کد PHP)
+        # در AMI، هر Variable باید به صورت جداگانه ارسال شود
+        # اما در _send_command، نمی‌توانیم چند Variable با همان key داشته باشیم
+        # پس باید command را مستقیماً بسازیم
+        if variables:
+            # ساخت command به صورت دستی (مطابق کد PHP)
+            command = "Action: Originate\r\n"
+            command += f"Channel: {channel}\r\n"
+            command += f"Context: {context}\r\n"
+            command += f"Exten: {extension}\r\n"
+            command += f"Priority: {priority}\r\n"
+            command += f"Timeout: {timeout * 1000}\r\n"
+            command += "Async: true\r\n"
+            
+            if caller_id:
+                command += f"CallerID: {caller_id}\r\n"
+            
+            # اضافه کردن Variables (هر Variable به صورت جداگانه)
+            for var_name, var_value in variables.items():
+                command += f"Variable: {var_name}={var_value}\r\n"
+            
+            command += "\r\n"
+            
+            print(f"Originate command (with Variables):\n{command}")
+            response = self._send_raw_command(command)
+            print(f"Originate response: {response}")
+        else:
+            # اگر variables نداریم، از روش عادی استفاده می‌کنیم
+            print(f"Originate with Context/Exten params: {params}")
+            response = self._send_command('Originate', params)
+            print(f"Originate response: {response}")
 
         # بررسی پاسخ
         if 'Response: Success' in response:
-            # استخراج Channel UniqueID از response
-            channel_uniqueid = None
-            for line in response.split('\r\n'):
-                if line.startswith('Channel:'):
-                    channel_uniqueid = line.split(':', 1)[1].strip()
-                    break
-            return True, "تماس با موفقیت آغاز شد", channel_uniqueid
+            # استخراج Channel ID از response
+            # Channel ID واقعی شامل unique ID است (مثال: SIP/0utgoing-2191012787-000002dc)
+            import re
+            channel_id = None
+            
+            # جستجو برای Channel ID واقعی در response
+            channel_match = re.search(
+                r'Channel:\s*(SIP/[^\r\n]+-\w+)',
+                response
+            )
+            if channel_match:
+                channel_id = channel_match.group(1)
+                print(f"Found real Channel ID from Events: {channel_id}")
+            else:
+                # الگوی جایگزین
+                channel_match = re.search(
+                    r'(SIP/[^\s\r\n/]+-\w+)',
+                    response
+                )
+                if channel_match:
+                    channel_id = channel_match.group(1)
+                    print(f"Found Channel ID with alternative pattern: {channel_id}")
+                else:
+                    # اگر پیدا نشد، از channel name استفاده می‌کنیم
+                    channel_id = channel
+                    print(f"Warning: Using channel name as Channel ID: {channel_id}")
+            
+            return True, "تماس با موفقیت آغاز شد", channel_id
         elif 'Response: Error' in response:
             error_msg = "خطا در برقراری تماس"
             for line in response.split('\r\n'):
@@ -883,6 +935,31 @@ class AsteriskManager:
             return False, error_msg, None
         else:
             return False, f"پاسخ نامعتبر: {response}", None
+
+    def _send_raw_command(self, command: str) -> str:
+        """
+        ارسال command خام به AMI (برای مواردی که نیاز به ساختار خاص داریم)
+        
+        Args:
+            command: command کامل AMI (با \r\n)
+        
+        Returns:
+            پاسخ از Asterisk
+        """
+        if not self.connected:
+            return "Response: Error\r\nMessage: Not connected\r\n\r\n"
+        
+        try:
+            # ارسال command
+            self.socket.sendall(command.encode('utf-8'))
+            print(f"Sent raw command: {repr(command)}")
+            
+            # دریافت پاسخ
+            response = self._receive_response()
+            return response
+        except Exception as e:
+            print(f"خطا در ارسال raw command: {e}")
+            return f"Response: Error\r\nMessage: {str(e)}\r\n\r\n"
 
     def _send_command(
         self,
